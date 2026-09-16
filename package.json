@@ -1,0 +1,12 @@
+{
+  "name": "sift",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Review queue for Soularr's FLACs on roon",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/server.mjs && python3 test/engine.py",
+    "ui": "node test/ui.mjs"
+  }
+}

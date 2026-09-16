@@ -1,0 +1,16 @@
+[Unit]
+Description=Sift — review queue for Soularr's FLACs
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/simon/sift
+Environment=PORT=8305
+# Loopback plus the tailnet address. Never 0.0.0.0, same as Switchboard.
+Environment=HOSTS=127.0.0.1,100.70.110.7
+ExecStart=/home/simon/.nvm/versions/node/v22.23.2/bin/node /home/simon/sift/server.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
