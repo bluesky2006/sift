@@ -420,56 +420,110 @@ async function renderAlbum(id, keepMode = false) {
 }
 
 // ---- player ------------------------------------------------------------------
+// Two <audio> elements: the one playing, and the same row's other version kept loaded
+// beside it. A/B starts the standby inside the tap itself - iOS only lets audio start
+// from a user gesture - so the switch is immediate instead of waiting for a fresh load.
 
-const audio = $('audio');
-let playing = null;          // { id, side, idx, row }
+const decks = [$('audio'), $('audio2')];
+let active = decks[0];
+const standby = () => (active === decks[0] ? decks[1] : decks[0]);
+let playing = null;          // { side, idx, row, album }
+let seeking = false;
 
-function play(side, idx, row, at = 0) {
-  if (!album) return;
-  const t = album[side].tracks[idx];
-  playing = { id: album.id, side, idx, row, album };
-  audio.src = `/api/audio/${album.id}/${side}/${idx}`;
-  const start = () => {
-    audio.currentTime = Math.min(at, Math.max(0, (audio.duration || at) - 1));
-    audio.play().catch(() => {});
-  };
-  if (at) audio.addEventListener('loadedmetadata', start, { once: true }); else audio.play().catch(() => {});
+const url = (a, side, idx) => `/api/audio/${a.id}/${side}/${idx}`;
+const partnerOf = (p) => {
+  const r = p && p.album.rows[p.row];
+  if (!r) return null;
+  const side = p.side === 'mp3' ? 'flac' : 'mp3';
+  const idx = side === 'mp3' ? r.m : r.f;
+  return idx == null ? null : { side, idx };
+};
+
+function load(deck, src) {
+  if (deck.getAttribute('src') !== src) {
+    deck.setAttribute('src', src);
+    deck.load();
+  }
+}
+
+function showPlaying() {
+  const t = playing.album[playing.side].tracks[playing.idx];
   $('player').hidden = false;
-  $('pside').textContent = side.toUpperCase();
-  $('pside').className = `side ${side}`;
+  $('pside').textContent = playing.side.toUpperCase();
+  $('pside').className = `side ${playing.side}`;
   $('ptitle').textContent = t.title || t.name;
-  const r = album.rows[row];
-  const other = r ? (side === 'mp3' ? r.f : r.m) : null;
-  $('ab').disabled = other == null;
+  $('ab').disabled = !partnerOf(playing);
+  $('seek').max = active.duration || 0;
+  $('plen').textContent = clock(active.duration);
   view.querySelectorAll('.play.on').forEach((b) => b.classList.remove('on'));
-  const btn = view.querySelector(`.play[data-side="${side}"][data-idx="${idx}"][data-row="${row}"]`);
+  const btn = view.querySelector(`.play[data-side="${playing.side}"][data-idx="${playing.idx}"][data-row="${playing.row}"]`);
   if (btn) btn.classList.add('on');
 }
 
+// keep the other version of this row loaded and parked, ready for A/B
+function prepareStandby() {
+  const p = partnerOf(playing);
+  const deck = standby();
+  deck.pause();
+  if (!p) return;
+  deck.preload = 'auto';
+  load(deck, url(playing.album, p.side, p.idx));
+}
+
+function play(side, idx, row) {
+  if (!album) return;
+  standby().pause();
+  playing = { side, idx, row, album };
+  active.preload = 'auto';
+  load(active, url(album, side, idx));
+  active.play().catch(() => {});
+  showPlaying();
+  prepareStandby();
+}
+
+function seekTo(deck, t) {
+  const go = () => { deck.currentTime = Math.min(t, Math.max(0, (deck.duration || t) - 0.5)); };
+  if (deck.readyState >= 1) go(); else deck.addEventListener('loadedmetadata', go, { once: true });
+}
+
 $('ab').onclick = () => {
-  if (!playing) return;
-  const r = playing.album.rows[playing.row];
-  if (!r) return;
-  const side = playing.side === 'mp3' ? 'flac' : 'mp3';
-  const idx = side === 'mp3' ? r.m : r.f;
-  if (idx == null) return;
-  const saved = album;
-  album = playing.album;
-  play(side, idx, playing.row, audio.currentTime);
-  album = saved;
+  const p = partnerOf(playing);
+  if (!p) return;
+  const from = active, to = standby(), at = from.currentTime, wasPlaying = !from.paused;
+  load(to, url(playing.album, p.side, p.idx));
+  seekTo(to, at);
+  if (wasPlaying) to.play().catch(() => {});      // still inside the tap
+  from.pause();
+  active = to;
+  playing = { ...playing, side: p.side, idx: p.idx };
+  showPlaying();
+  // the deck we left already holds the partner's partner - the track we were on - so it
+  // stays loaded and the next A/B is just as quick
 };
-$('pp').onclick = () => (audio.paused ? audio.play() : audio.pause());
-$('pclose').onclick = () => { audio.pause(); audio.removeAttribute('src'); $('player').hidden = true; playing = null; };
-audio.onplay = () => { $('pp').textContent = '❚❚'; };
-audio.onpause = () => { $('pp').textContent = '▶'; };
-audio.ontimeupdate = () => {
-  $('ptime').textContent = clock(audio.currentTime);
-  if (!seeking) $('seek').value = audio.currentTime;
+
+$('pp').onclick = () => (active.paused ? active.play() : active.pause());
+$('pclose').onclick = () => {
+  for (const d of decks) { d.pause(); d.removeAttribute('src'); d.load(); }
+  $('player').hidden = true;
+  playing = null;
+  view.querySelectorAll('.play.on').forEach((b) => b.classList.remove('on'));
 };
-audio.onloadedmetadata = () => { $('seek').max = audio.duration || 0; $('plen').textContent = clock(audio.duration); };
-let seeking = false;
+for (const d of decks) {
+  d.addEventListener('play', () => { if (d === active) $('pp').textContent = '❚❚'; });
+  d.addEventListener('pause', () => { if (d === active) $('pp').textContent = '▶'; });
+  d.addEventListener('timeupdate', () => {
+    if (d !== active) return;
+    $('ptime').textContent = clock(d.currentTime);
+    if (!seeking) $('seek').value = d.currentTime;
+  });
+  d.addEventListener('loadedmetadata', () => {
+    if (d !== active) return;
+    $('seek').max = d.duration || 0;
+    $('plen').textContent = clock(d.duration);
+  });
+}
 $('seek').oninput = () => { seeking = true; $('ptime').textContent = clock(Number($('seek').value)); };
-$('seek').onchange = () => { audio.currentTime = Number($('seek').value); seeking = false; };
+$('seek').onchange = () => { active.currentTime = Number($('seek').value); seeking = false; };
 
 // ---- the bin -----------------------------------------------------------------
 

@@ -2,7 +2,7 @@
 // to catch what the API tests can't: a handler that doesn't fire, a mode that doesn't
 // render, a script error. Needs playwright-core in /tmp/node_modules and Chrome at
 // /usr/bin/google-chrome, as Switchboard's ui test does.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,12 @@ const stub = path.join(T, 'engine.sh');
 fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${T}/calls\n`, { mode: 0o755 });
 const calls = () => { try { return fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n'); } catch { return []; } };
 
+// real audio for the A/B test: a 20 s tone per version
+const MEDIA = path.join(T, 'media');
+fs.mkdirSync(MEDIA, { recursive: true });
+for (const [name, codec, freq] of [['a.mp3', 'libmp3lame', 440], ['a.flac', 'flac', 660]]) {
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=20`, '-c:a', codec, path.join(MEDIA, name)]);
+}
 const t = (title, secs) => ({ name: `${title}.x`, title, secs, fmt: '16-bit / 44.1 kHz' });
 fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
   checked: new Date().toISOString(),
@@ -32,7 +38,8 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     { id: 2, artist: 'Other', title: 'Fine', queue: 'ready', reasons: ['Every track matches'],
       allowed: ['keep_flac', 'refetch', 'watch'], watch: true, reorder: true,
       flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
-      pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
+      pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false,
+      _files: { flac: [path.join(MEDIA, 'a.flac')], mp3: [path.join(MEDIA, 'a.mp3')] } },
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -40,7 +47,7 @@ fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
 
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
-    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub },
+    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_AUDIO_ROOTS: MEDIA },
   stdio: 'ignore',
 });
 for (let i = 0; i < 50; i++) {
@@ -49,7 +56,7 @@ for (let i = 0; i < 50; i++) {
 
 let failures = 0;
 const check = (cond, what) => { console.log(`${cond ? '  ok  ' : '  FAIL'} ${what}`); if (!cond) failures++; };
-const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true });
+const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--autoplay-policy=user-gesture-required'] });
 const errors = [];
 try {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
@@ -122,6 +129,35 @@ try {
   await page.click('#dok');
   await page.waitForTimeout(1500);
   check(calls().some((c) => c.endsWith('bin-track 1 3')), 'the track goes to the bin');
+
+  console.log('A/B');
+  await page.goto(BASE + '/app');
+  await page.waitForSelector('.queue');
+  await page.click('a.row[href="#/album/2"]');
+  await page.waitForSelector('.play[data-side="mp3"]');
+  await page.click('.play[data-side="mp3"]');
+  await page.waitForTimeout(3000);
+  const decks = () => page.evaluate(() => [...document.querySelectorAll('audio')].map((d) =>
+    ({ src: d.getAttribute('src') || '', paused: d.paused, t: d.currentTime, ready: d.readyState })));
+  let d = await decks();
+  const mp3Deck = d.find((x) => x.src.endsWith('/mp3/0'));
+  const flacDeck = d.find((x) => x.src.endsWith('/flac/0'));
+  check(mp3Deck && !mp3Deck.paused && mp3Deck.t > 1, 'MP3 plays');
+  check(flacDeck && flacDeck.paused && flacDeck.ready >= 1, 'the FLAC waits loaded beside it');
+  const before = mp3Deck.t;
+  await page.click('#ab');
+  await page.waitForTimeout(250);
+  d = await decks();
+  const nowFlac = d.find((x) => x.src.endsWith('/flac/0'));
+  const nowMp3 = d.find((x) => x.src.endsWith('/mp3/0'));
+  check(!nowFlac.paused && nowMp3.paused, 'A/B switches to the FLAC at once');
+  check(Math.abs(nowFlac.t - before) < 1.5, `at the same moment (${before.toFixed(1)} → ${nowFlac.t.toFixed(1)})`);
+  check((await page.locator('#pside').textContent()) === 'FLAC', 'player says FLAC');
+  await page.waitForTimeout(1000);
+  await page.click('#ab');
+  await page.waitForTimeout(250);
+  d = await decks();
+  check(!d.find((x) => x.src.endsWith('/mp3/0')).paused && d.find((x) => x.src.endsWith('/flac/0')).paused, 'and back again');
 
   console.log('one album and bin view');
   await openAlbum();
