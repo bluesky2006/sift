@@ -182,6 +182,34 @@ json.dump(conf2, open(f"{T}/conf.json", "w"))
 r = sift("empty-bin", ok=False)
 check(r.returncode != 0 and os.path.isdir(f"{MUSIC}/FLAC"), "refuses to empty a bin that is not named Sift-bin")
 
+print("moves that go wrong")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+tone(f"{DATA}/music-flac/Busy/Alb/01.flac", "flac")
+tone(f"{MUSIC}/MP3/Busy/Alb/01.mp3", "libmp3lame")
+open(f"{DATA}/music-flac/Busy/Alb/.fuse_hidden0001", "w").write("deleted but still open")
+busy = {"id": 8, "artist": "Busy", "title": "Alb", "queue": "ready", "status": "retire",
+        "allowed": ["keep_flac"], "_do": {"flac_dir": f"{DATA}/music-flac/Busy/Alb", "dest": f"{MUSIC}/FLAC/Busy/Alb",
+        "mp3_dirs": [f"{MUSIC}/MP3/Busy/Alb"], "mp3_id": 18, "mbid": "mb-8", "hold": None, "foreign_ids": []}}
+json.dump({"items": [busy]}, open(f"{STATE}/queue.json", "w"))
+r = sift("resolve", "8", "keep_flac")
+check(r.returncode == 0 and os.path.isfile(f"{MUSIC}/FLAC/Busy/Alb/01.flac"), "a .fuse_hidden leftover does not fail the move")
+check(not os.path.exists(f"{MUSIC}/FLAC/Busy/Alb/.fuse_hidden0001"), "and is not copied into the library")
+
+tone(f"{DATA}/music-flac/Stuck/Alb/01.flac", "flac")
+tone(f"{DATA}/music-flac/Stuck/Alb/02.flac", "flac")
+tone(f"{MUSIC}/MP3/Stuck/Alb/01.mp3", "libmp3lame")
+os.chmod(f"{DATA}/music-flac/Stuck/Alb/02.flac", 0)
+stuck = {**busy, "id": 9, "artist": "Stuck", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Stuck/Alb",
+         "dest": f"{MUSIC}/FLAC/Stuck/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Stuck/Alb"], "mp3_id": 19, "mbid": "mb-9"}}
+json.dump({"items": [stuck]}, open(f"{STATE}/queue.json", "w"))
+migrated_before = load(conf["migrated"], {})
+r = sift("resolve", "9", "keep_flac", ok=False)
+os.chmod(f"{DATA}/music-flac/Stuck/Alb/02.flac", 0o644)
+check(r.returncode != 0, "a move that cannot finish fails")
+check(sorted(os.listdir(f"{DATA}/music-flac/Stuck/Alb")) == ["01.flac", "02.flac"], "every file is back in the source")
+check(not os.path.exists(f"{MUSIC}/FLAC/Stuck"), "nothing is left in the library")
+check(os.path.isfile(f"{MUSIC}/MP3/Stuck/Alb/01.mp3") and load(conf["migrated"], {}) == migrated_before, "MP3 and ledger untouched")
+
 print("track tools")
 json.dump(conf, open(f"{T}/conf.json", "w"))
 tone(f"{DATA}/music-flac/Tools/Alb/Tools - Alb - 01 - One.flac", "flac")

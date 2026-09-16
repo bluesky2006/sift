@@ -7,6 +7,7 @@
 
 const http = require('http');
 const { spawn } = require('child_process');
+const { pipeline } = require('stream');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
@@ -145,7 +146,10 @@ async function streamFile(req, res, file) {
     ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${st.size}` } : {}),
   }));
   if (req.method === 'HEAD') return res.end();
-  fs.createReadStream(real, { start, end }).pipe(res);
+  // pipeline, not pipe: when the browser drops the request (a seek, a skipped track, a
+  // preload it no longer wants) the file is closed at once. A file left open here and then
+  // moved by a decision lingers on the NTFS drive as .fuse_hidden and fails the move.
+  pipeline(fs.createReadStream(real, { start, end }), res, () => {});
 }
 
 // ---- routes ----------------------------------------------------------------

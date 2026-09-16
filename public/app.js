@@ -142,7 +142,14 @@ async function watchJob() {
 }
 $('jobclose').onclick = () => { $('jobbar').hidden = true; };
 
+// Stop playback and let go of the files before anything moves them.
+function releaseAudio() {
+  if (!playing) return;
+  $('pclose').onclick();
+}
+
 async function run(path, body) {
+  releaseAudio();
   try {
     await api(path, body);
     watchJob();
@@ -346,6 +353,7 @@ async function renderAlbum(id, keepMode = false) {
 
   // ---- track tools
   const tool = async (body, note) => {
+    if (body.tool === 'reorder' || body.tool === 'bin_track') releaseAudio();
     try {
       await api('/api/track', { id: a.id, ...body });
       await watchJob();

@@ -357,12 +357,34 @@ def move(src, dst):
         os.rename(src, dst)
     else:
         r = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
-                            src + "/", dst + "/"], capture_output=True, text=True)
-        left = [f for _, _, fs in os.walk(src) for f in fs]
+                            "--exclude", ".fuse_hidden*", src + "/", dst + "/"],
+                           capture_output=True, text=True)
+        left = leftovers(src)
         if r.returncode or left:
-            raise RuntimeError(f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left)")
+            # put back whatever landed, so the caller's rollback starts from where it began
+            subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
+                            dst + "/", src + "/"], capture_output=True)
+            subprocess.run(["find", dst, "-depth", "-type", "d", "-empty", "-delete"])
+            prune(dst, mount_of(dst))
+            raise RuntimeError(f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left: "
+                               + ", ".join(left[:3]) + ")")
+        clear_fuse_hidden(src)
         subprocess.run(["find", src, "-depth", "-type", "d", "-empty", "-delete"])
     prune(src, mount_of(src))
+
+
+def leftovers(folder):
+    """Files still in a folder after a move. `.fuse_hidden*` is ntfs-3g's name for a file
+    already deleted while something still had it open - gone, just not yet released."""
+    return [f for _, _, fs in os.walk(folder) for f in fs if not f.startswith(".fuse_hidden")]
+
+
+def clear_fuse_hidden(folder, wait=10):
+    """Give open handles a moment to close so the emptied folder can be removed."""
+    for _ in range(wait):
+        if not any(f.startswith(".fuse_hidden") for _, _, fs in os.walk(folder) for f in fs):
+            return
+        time.sleep(1)
 
 
 class Entry:
