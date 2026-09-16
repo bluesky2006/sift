@@ -275,6 +275,159 @@ calls = [json.loads(l) for l in open(API)]
 check(r.returncode == 0 and ["flac", "PUT", "/album/monitor", {"albumIds": [77], "monitored": False}] in calls,
       "deciding a one-album folder unmonitors the entry that held its stray tracks")
 
+print("measuring")
+# stand-ins for the calibration: broadband noise as a genuine CD rip, and the same noise
+# through a 128 kbps MP3 and back to FLAC, which is what a converted download is
+os.environ.update({"SIFT_STATE": STATE, "SIFT_CONF": f"{T}/conf.json"})
+sys.path.insert(0, os.path.join(HERE, "..", "bin"))
+json.dump(conf, open(f"{T}/conf.json", "w"))
+import sift as S
+S.fm.CACHE = f"{T}/cache.json"                     # never the real check cache
+M = f"{T}/measure"
+os.makedirs(M, exist_ok=True)
+noise = ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "anoisesrc=d=8:c=pink:r=44100:a=0.3"]
+subprocess.run(noise + [f"{M}/real.flac"], check=True)
+subprocess.run(noise + ["-af", "volume=-6dB", f"{M}/quiet.flac"], check=True)
+subprocess.run(["ffmpeg", "-v", "error", "-i", f"{M}/real.flac", "-b:a", "128k", "-cutoff", "16000", f"{M}/lossy.mp3"], check=True)
+subprocess.run(["ffmpeg", "-v", "error", "-i", f"{M}/lossy.mp3", f"{M}/fake.flac"], check=True)
+real, fake, quiet = (S.measure(f"{M}/{n}.flac") for n in ("real", "fake", "quiet"))
+check(real["cutoff"] > 21000, f"a genuine FLAC reaches the top ({real['cutoff']} Hz)")
+check(fake["cutoff"] < S.SUSPECT_HZ, f"a FLAC made from an MP3 stops short ({fake['cutoff']} Hz)")
+check(real["lufs"] is not None and abs(real["lufs"] - quiet["lufs"] - 6) < 0.5,
+      f"loudness measured ({real['lufs']} and {quiet['lufs']} LUFS)")
+check(S.fm.file_entry(f"{M}/fake.flac")["cutoff"] == fake["cutoff"], "and cached with the file")
+
+tr = lambda c: {"name": "x", "cutoff": c}
+sus = {"flac": {"tracks": [tr(16000), tr(16100), tr(22050)]}, "mp3": {"tracks": [tr(16000)]},
+       "reasons": ["Every track matches"], "_reasons": ["Every track matches"]}
+S.suspect(sus)
+check(sus["suspect"] == {"low": 2, "of": 3, "hz": 16100, "mp3_hz": 16000} and "converted MP3" in sus["reasons"][0],
+      "an album whose FLAC tracks mostly stop short is flagged")
+ok_album = {"flac": {"tracks": [tr(16000), tr(22050), tr(22050)]}, "mp3": None, "reasons": [], "_reasons": []}
+check(S.suspect(ok_album)["suspect"] is None, "one short track is not enough")
+over = {**sus, "id": 40, "queue": "ready", "_status": "retire", "pairs": [{"m": 0, "f": 0, "sim": .9, "same": True}],
+        "_files": {"flac": ["a.flac"], "mp3": ["a.mp3"]}}
+check(S.apply_overrides(over, None)["queue"] == "suspect", "a suspect album never lands in Ready")
+
+print("release details")
+import sqlite3
+db = f"{T}/lidarr.db"
+c = sqlite3.connect(db)
+c.executescript("""
+create table Albums (Id, ForeignAlbumId, ReleaseDate, AlbumType);
+create table AlbumReleases (Id, AlbumId, ForeignReleaseId, Title, Disambiguation, ReleaseDate, Label, Country, Media, TrackCount, Status, Monitored);
+create table Tracks (Id, AlbumReleaseId, TrackFileId);
+insert into Albums values (7, 'rg-1', '1971-05-10 00:00:00Z', 'Album');
+insert into AlbumReleases values (1, 7, 'rel-selected', 'Alb', '', '1971-05-10', '["Cotillion"]', '["United States"]', '[{"format":"Vinyl"}]', 9, 'Official', 1);
+insert into AlbumReleases values (2, 7, 'rel-imported', 'Alb', 'remaster', '2012-01-01', '["Rhino"]', '["Europe"]', '[{"format":"CD"}]', 9, 'Official', 0);
+insert into Tracks values (1, 2, 55);
+""")
+c.commit()
+S.CONF["flac_db"] = f"file:{db}?mode=ro"
+d = S.details("flac", 7, [f"{MUSIC}/MP3/Art/Alb/01.mp3"])
+check(d["release"] == "rel-imported" and d["date"] == "2012-01-01" and d["label"] == "Rhino"
+      and d["title"] == "Alb (remaster)" and d["original"] == "1971-05-10" and d["format"] == "CD",
+      "the release the files were imported as, over the selected one")
+check(isinstance(d["tags"], dict), "and the file's tags")
+
+print("library duplicates")
+tone(f"{MUSIC}/FLAC/Dupe Band/Twice/01.flac", "flac")
+tone(f"{MUSIC}/FLAC/Dupe Band/Twice/02.flac", "flac")
+tone(f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3", "libmp3lame")
+tone(f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/02.mp3", "libmp3lame")
+tone(f"{MUSIC}/FLAC/Solo/Only FLAC/01.flac", "flac")
+found = [f for f in S.find_dupes(set()) if f["artist"] == "Dupe Band"]
+check(len(found) == 1 and found[0]["mp3_dirs"] == [f"{MUSIC}/MP3/The Dupe Band/Twice (1999)"],
+      "a FLAC library album with an MP3 folder of the same name is found")
+check(not any(f["artist"] == "Solo" for f in S.find_dupes(set())), "an album only in FLAC is not")
+check(not any(f["artist"] == "Dupe Band" for f in S.find_dupes({f"{MUSIC}/FLAC/Dupe Band/Twice"})),
+      "a folder the review queue already covers is left to it")
+dupe = S.item_from_dupe(found[0], {f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3": 31,
+                                   f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/02.mp3": 31})
+check(dupe["queue"] == "dupes" and dupe["id"] >= S.DUPE_BASE and set(dupe["allowed"]) == {"keep_flac", "keep_mp3"},
+      "it becomes a Library duplicates item")
+check(dupe["_do"]["mp3_id"] == 31 and len(dupe["pairs"]) == 2, "with the MP3 Lidarr album and track pairs")
+json.dump({"items": [dupe]}, open(f"{STATE}/queue.json", "w"))
+before_dupe = snapshot()
+open(API, "w").close()
+r = sift("resolve", str(dupe["id"]), "keep_flac")
+calls = [json.loads(l) for l in open(API)]
+check(r.returncode == 0 and os.path.isfile(f"{MUSIC}/FLAC/Dupe Band/Twice/01.flac")
+      and not os.path.exists(f"{MUSIC}/MP3/The Dupe Band"), "Keep FLAC bins the MP3 and leaves the FLAC")
+check(["mp3", "PUT", "/album/monitor", {"albumIds": [31], "monitored": False}] in calls
+      and not any(c[0] == "flac" and c[2].startswith("/album") for c in calls), "and unmonitors only the MP3")
+de = load(f"{STATE}/bin.json")["entries"][-1]
+r = sift("undo", de["id"])
+check(r.returncode == 0 and snapshot() == before_dupe, "undo puts the MP3 back")
+json.dump({"items": [dupe]}, open(f"{STATE}/queue.json", "w"))
+r = sift("resolve", str(dupe["id"]), "keep_mp3")
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Dupe Band")
+      and os.path.isfile(f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3"), "Keep MP3 bins the FLAC")
+check(os.path.isdir(f"{MUSIC}/FLAC"), "the FLAC library root stays")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+check(snapshot() == before_dupe, "and undo restores it")
+
+print("several albums at once")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+write_queue()
+for i in (1, 2):
+    if not os.path.exists(f"{DATA}/music-flac/Art/Alb/0{i}.flac"):
+        tone(f"{DATA}/music-flac/Art/Alb/0{i}.flac", "flac")
+r = sift("resolve-many", "keep_mp3", "1,3,2")
+entries = load(f"{STATE}/bin.json")["entries"]
+check(r.returncode == 0 and {e["album_id"] for e in entries[-3:]} == {1, 2, 3}, "each album gets its own bin entry")
+write_queue()
+r = sift("resolve-many", "keep_flac", "1,3")
+hist = load(f"{STATE}/history.json", {})
+check(r.returncode == 0 and any(f["album_id"] == 3 for f in hist.get("failed", [])),
+      "an album that can't take the decision is recorded as failed")
+check(sift("resolve-many", "rm", "1", ok=False).returncode != 0, "an unknown decision is refused")
+check(sift("resolve-many", "keep_mp3", "1;2", ok=False).returncode != 0, "ids must be integers")
+last = load(f"{STATE}/bin.json")["entries"][-1]
+sift("undo", last["id"])
+check(any(u["id"] == last["id"] for u in load(f"{STATE}/history.json")["undone"]), "undo is kept in the history")
+n_before = len(load(f"{STATE}/bin.json")["entries"])
+sift("empty-bin")
+em = load(f"{STATE}/history.json")["emptied"][-1]
+check(len(em["entries"]) == n_before and em["bytes"] > 0 and "ops" not in em["entries"][0],
+      "emptying records what went and how much, without paths")
+
+print("jot")
+import http.server, threading, hmac as _hmac, hashlib as _hashlib, base64 as _b64
+got = []
+
+
+class Jot(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        got.append((self.headers["Cookie"], json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+        self.send_response(201); self.end_headers(); self.wfile.write(b"{}")
+
+    def log_message(self, *a):
+        pass
+
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), Jot)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+json.dump({"secret": "abc123"}, open(f"{T}/jotauth.json", "w"))
+S.CONF.update(jot_url=f"http://127.0.0.1:{srv.server_port}/api/jot", jot_auth=f"{T}/jotauth.json")
+S.NOTIFY = f"{T}/notify.json"
+q = lambda i, queue: {"id": i, "artist": f"A{i}", "title": "T", "queue": queue}
+S.notify([q(1, "ready"), q(2, "lineup")])
+check(not got and load(S.NOTIFY)["told"] == [1, 2], "the first check only records what is already waiting")
+S.notify([q(1, "ready"), q(2, "lineup"), q(3, "ready"), q(4, "ready"), q(5, "damaged"), q(6, "arriving")])
+check(len(got) == 1 and got[0][1]["subject"] == "Sift: 2 new albums ready, 1 to review", f"new albums are jotted ({got and got[0][1]['subject']})")
+payload, mac = got[0][0].split("=", 1)[1].split(".")
+want = _b64.urlsafe_b64encode(_hmac.new(b"abc123", payload.encode(), _hashlib.sha256).digest()).rstrip(b"=").decode()
+check(got[0][0].startswith("mdedit_sid=") and mac == want, "with a session cookie signed as JotScribe signs one")
+S.notify([q(1, "ready"), q(7, "ready")])
+check(len(got) == 1, "at most once a day")
+st = load(S.NOTIFY); st["sent"] = "2000-01-01T00:00:00"; json.dump(st, open(S.NOTIFY, "w"))
+S.notify([q(1, "ready"), q(2, "lineup"), q(3, "ready"), q(4, "ready"), q(5, "damaged")])
+check(len(got) == 1, "and only when something new has arrived")
+S.notify([q(1, "ready"), q(7, "ready")])
+check(len(got) == 2 and got[1][1]["subject"] == "Sift: 1 new album ready", "the next day, the next arrival is told")
+srv.shutdown()
+
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")
 sys.exit(1 if failures else 0)

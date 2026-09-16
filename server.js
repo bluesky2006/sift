@@ -6,7 +6,8 @@
 // file operation is bin/sift.py run with a fixed argv. Nothing here moves or deletes a file.
 
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
+const crypto = require('crypto');
 const { pipeline } = require('stream');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -24,9 +25,11 @@ const PYTHON = process.env.SIFT_PYTHON || '/usr/bin/python3';
 
 // Audio is only ever served from these, whatever queue.json says.
 const AUDIO_ROOTS = (process.env.SIFT_AUDIO_ROOTS
-  || '/mnt/roon-data/music-flac,/mnt/roon-music/MP3,/mnt/roon-music/FLAC-damaged').split(',');
+  || '/mnt/roon-data/music-flac,/mnt/roon-music/MP3,/mnt/roon-music/FLAC-damaged,/mnt/roon-music/FLAC').split(',');
+const FFMPEG = process.env.SIFT_FFMPEG || 'ffmpeg';
 
 const DECISIONS = new Set(['keep_flac', 'keep_mp3', 'refetch', 'watch_on', 'watch_off']);
+const MANY = new Set(['keep_flac', 'keep_mp3', 'refetch']);
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -109,6 +112,7 @@ const pub = (item) => Object.fromEntries(Object.entries(item).filter(([k]) => !k
 let job = null;
 function startJob(kind, args, label) {
   if (job && !job.done) return null;
+  stopSpectra();
   const j = { id: Date.now().toString(36), kind, label, started: Date.now(), output: '', done: false, ok: null };
   const child = spawn(PYTHON, [ENGINE, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const take = (b) => { j.output = (j.output + b.toString()).slice(-8000); };
@@ -150,6 +154,91 @@ async function streamFile(req, res, file) {
   // preload it no longer wants) the file is closed at once. A file left open here and then
   // moved by a decision lingers on the NTFS drive as .fuse_hidden and fails the move.
   pipeline(fs.createReadStream(real, { start, end }), res, () => {});
+}
+
+// ---- spectrograms ----------------------------------------------------------
+// Drawn by ffmpeg on request and kept in STATE/spectra, named after the file's path, size
+// and time, so a changed file gets a new picture. A job stops any being drawn: they're
+// only pictures, and a file held open by one would fail a move on the NTFS drive.
+
+const SPECTRA = path.join(STATE, 'spectra');
+const drawing = new Map();        // cache name -> { child, promise }
+const waiting = [];               // starts held back so no more than three draw at once
+let running = 0;
+
+function stopSpectra() {
+  for (const d of drawing.values()) if (d.child) d.child.kill('SIGKILL');
+  for (const w of waiting.splice(0)) w();
+}
+
+// resolves to the picture's path, 'refused' for a file outside the music folders, or null
+// when it can't be drawn right now
+async function spectrum(file) {
+  const real = await fsp.realpath(file).catch(() => null);
+  if (!real || !AUDIO_ROOTS.some((r) => real.startsWith(r + '/'))) return 'refused';
+  const st = await fsp.stat(real);
+  const name = crypto.createHash('sha1').update(`${real}|${st.size}|${st.mtimeMs}`).digest('hex') + '.png';
+  const out = path.join(SPECTRA, name);
+  await fsp.mkdir(SPECTRA, { recursive: true });
+  if (fs.existsSync(out)) return out;
+  if (drawing.has(name)) return drawing.get(name).promise;
+  if (job && !job.done) return null;
+  const d = { child: null };
+  d.promise = (async () => {
+    if (running >= 3) await new Promise((go) => waiting.push(go));
+    if (job && !job.done) { drawing.delete(name); return null; }
+    running++;
+    const tmp = `${out}.${process.pid}.tmp.png`;
+    const ok = await new Promise((resolve) => {
+      d.child = execFile(FFMPEG, ['-v', 'error', '-nostdin', '-y', '-i', real, '-lavfi',
+        'showspectrumpic=s=720x320:legend=1:mode=combined:win_func=bharris', '-frames:v', '1', tmp],
+      { timeout: 120000 }, (err) => resolve(!err));
+    });
+    running--;
+    if (waiting.length) waiting.shift()();
+    drawing.delete(name);
+    if (!ok) { await fsp.unlink(tmp).catch(() => {}); return null; }
+    return fsp.rename(tmp, out).then(() => out, () => null);
+  })();
+  drawing.set(name, d);
+  return d.promise;
+}
+
+// ---- history ---------------------------------------------------------------
+// What is in the bin, what left it (history.json, kept by the engine), and jobs that failed
+// (audit.log). Totals count decisions still in the bin plus those emptied for good.
+
+const TOTALS = { keep_flac: 'flac', keep_mp3: 'mp3', refetch: 'refetch' };
+
+async function history() {
+  const b = await readState('bin.json', { entries: [] });
+  const h = await readState('history.json', {});
+  const pick = (e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 });
+  const events = [
+    ...b.entries.map((e) => ({ ...pick(e), outcome: 'bin' })),
+    ...(h.undone || []).map((e) => ({ ...pick(e), outcome: 'undone', when: e.undone })),
+    ...(h.emptied || []).flatMap((x) => x.entries.map((e) => ({ ...pick(e), outcome: 'emptied', when: x.at }))),
+    ...(h.failed || []).map((e) => ({ at: e.at, decision: e.decision, label: e.label, outcome: 'failed', error: e.error })),
+  ];
+  let log = '';
+  try { log = await fsp.readFile(path.join(STATE, 'audit.log'), 'utf8'); } catch { /* none yet */ }
+  for (const line of log.split('\n')) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (ev.event !== 'job-done' || ev.ok || ev.kind === 'check') continue;
+    events.push({ at: ev.at, decision: ev.kind, label: ev.label, outcome: 'failed', error: ev.output || '' });
+  }
+  // errors quote the paths they failed on; those stay here
+  for (const e of events) {
+    if (e.error) e.error = e.error.trim().split('\n').pop().replace(/(^|[\s(])\/[^:\n]*/g, '$1…').slice(0, 300);
+  }
+  events.sort((x, y) => new Date(y.at) - new Date(x.at));
+  const totals = { flac: 0, mp3: 0, refetch: 0, freed: 0, emptied: (h.emptied || []).length };
+  for (const e of events) {
+    if ((e.outcome === 'bin' || e.outcome === 'emptied') && TOTALS[e.decision]) totals[TOTALS[e.decision]]++;
+  }
+  for (const x of h.emptied || []) totals.freed += x.bytes || 0;
+  return { events: events.slice(0, 1000), totals };
 }
 
 // ---- routes ----------------------------------------------------------------
@@ -203,7 +292,8 @@ async function handle(req, res) {
     const b = await readState('bin.json', { entries: [] });
     const items = q.items.map((i) => ({
       id: i.id, artist: i.artist, title: i.title, queue: i.queue, reasons: i.reasons,
-      cover: i.cover, first_seen: i.first_seen, watch: i.watch,
+      cover: i.cover, first_seen: i.first_seen, watch: i.watch, allowed: i.allowed,
+      suspect: i.suspect || null, dupe: !!i.dupe,
       flac: i.flac ? { n: i.flac.tracks.length, fmt: (i.flac.tracks[0] || {}).fmt || '',
         damaged: i.flac.tracks.filter((t) => t.damaged).length } : null,
       mp3: i.mp3 ? { n: i.mp3.tracks.length, fmt: (i.mp3.tracks[0] || {}).fmt || '' } : null,
@@ -230,12 +320,25 @@ async function handle(req, res) {
     return file ? streamFile(req, res, file) : send(res, 404, 'not found');
   }
 
-  if ((m = /^\/api\/cover\/(\d+)$/.exec(p)) && req.method === 'GET') {
+  if ((m = /^\/api\/cover\/(\d+)(?:\/(flac|mp3))?$/.exec(p)) && req.method === 'GET') {
     try {
-      const body = await fsp.readFile(path.join(STATE, 'covers', `${Number(m[1])}.jpg`));
+      const body = await fsp.readFile(path.join(STATE, 'covers', `${Number(m[1])}${m[2] ? `-${m[2]}` : ''}.jpg`));
       return send(res, 200, body, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400' });
     } catch { return send(res, 404, 'not found'); }
   }
+
+  if ((m = /^\/api\/spectrum\/(\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const q = await readState('queue.json', { items: [] });
+    const item = q.items.find((i) => i.id === Number(m[1]));
+    const file = item && item._files && (item._files[m[2]] || [])[Number(m[3])];
+    if (!file) return send(res, 404, 'not found');
+    const out = await spectrum(file);
+    if (out === 'refused') return send(res, 404, 'not found');
+    if (!out) return send(res, 503, 'not available now', { 'Retry-After': '10' });
+    return send(res, 200, await fsp.readFile(out), { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=86400' });
+  }
+
+  if (p === '/api/history' && req.method === 'GET') return json(res, 200, await history());
 
   if (p === '/api/job' && req.method === 'GET') {
     return json(res, 200, { job: job && { kind: job.kind, label: job.label, done: job.done, ok: job.ok, output: job.output } });
@@ -262,6 +365,22 @@ async function handle(req, res) {
       audit({ event: 'decide', id, decision: body.decision, label });
       const j = startJob(body.decision, ['resolve', String(id), body.decision], label);
       return j ? json(res, 202, { job: j.id }) : busy();
+    }
+    if (p === '/api/decide-many') {
+      // one decision for several albums: ids are integers, each checked against the queue
+      if (!MANY.has(body.decision) || !Array.isArray(body.ids) || !body.ids.length || body.ids.length > 500
+        || !body.ids.every(Number.isInteger)) return json(res, 400, { error: 'bad decision' });
+      const q = await readState('queue.json', { items: [] });
+      const ids = [...new Set(body.ids)].filter((id) => {
+        const item = q.items.find((i) => i.id === id);
+        return item && item.allowed.includes(body.decision);
+      });
+      if (!ids.length) return json(res, 400, { error: 'not available for any of these albums' });
+      const label = `${{ keep_flac: 'Keep FLAC', keep_mp3: 'Keep MP3', refetch: 'Get a better FLAC' }[body.decision]}`
+        + ` for ${ids.length} album${ids.length === 1 ? '' : 's'}`;
+      audit({ event: 'decide-many', ids, decision: body.decision });
+      const j = startJob(body.decision, ['resolve-many', body.decision, ids.join(',')], label);
+      return j ? json(res, 202, { job: j.id, n: ids.length }) : busy();
     }
     if (p === '/api/track') {
       // track tools: every argument is an integer index, checked against the album

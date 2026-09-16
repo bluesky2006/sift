@@ -1,6 +1,6 @@
 // Server tests: auth, CSRF, what reaches the browser, audio confinement, and that the
 // engine is only ever run with an id and a known decision. The engine is a stub here.
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,6 +16,7 @@ fs.mkdirSync(path.join(MUSIC, 'Art/Alb'), { recursive: true });
 fs.writeFileSync(path.join(MUSIC, 'Art/Alb/01.flac'), Buffer.alloc(10000, 7));
 fs.writeFileSync(path.join(T, 'secret.flac'), 'secret');
 fs.symlinkSync(path.join(T, 'secret.flac'), path.join(MUSIC, 'Art/Alb/link.flac'));
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', path.join(MUSIC, 'Art/Alb/tone.flac')]);
 
 // the engine stub records its argv, and runs for a moment so a second job can collide
 const stub = path.join(T, 'engine.sh');
@@ -29,8 +30,20 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/dir' },
     _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd', path.join(MUSIC, 'Art/Alb/link.flac')], mp3: [] },
+  }, {
+    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+    suspect: { low: 1, of: 1, hz: 16000, mp3_hz: null },
+    flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
+    _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
   }],
 }));
+fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
+  { id: 'b1', at: '2026-09-10T10:00:00', decision: 'keep_flac', album_id: 5, label: 'In — Bin', bytes: 100, ops: [{ op: 'move', from: '/secret/from', to: '/secret/to' }] }] }));
+fs.writeFileSync(path.join(STATE, 'history.json'), JSON.stringify({
+  emptied: [{ at: '2026-09-12T10:00:00', bytes: 5e9, entries: [{ id: 'e1', at: '2026-09-09T10:00:00', decision: 'keep_mp3', label: 'Gone — Album', bytes: 5e9 }] }],
+  undone: [{ id: 'u1', at: '2026-09-08T10:00:00', decision: 'keep_flac', label: 'Undone — Album', undone: '2026-09-08T11:00:00' }],
+}));
+fs.writeFileSync(path.join(STATE, 'audit.log'), JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', label: 'Broke — Album', ok: false, output: 'rsync /secret/music/Broke/Album: (2 left)\n' }) + '\n');
 
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
@@ -78,6 +91,26 @@ try {
   const al = await (await req('/api/album/1')).text();
   check(!st.includes('_do') && !st.includes('_files') && !st.includes(MUSIC), 'state carries no paths');
   check(!al.includes('_do') && !al.includes('_files') && !al.includes('/secret/dir'), 'album carries no paths');
+  const stj = JSON.parse(st);
+  check(stj.items[1].suspect.hz === 16000 && stj.items[1].allowed.includes('keep_mp3'), 'state carries the suspect flag and allowed decisions');
+
+  console.log('history');
+  const hist = await (await req('/api/history')).json();
+  const outcomes = hist.events.map((e) => `${e.label}:${e.outcome}`);
+  check(['In — Bin:bin', 'Gone — Album:emptied', 'Undone — Album:undone', 'Broke — Album:failed'].every((x) => outcomes.includes(x)),
+    `history joins the bin, what left it and failed jobs (${outcomes.join(', ')})`);
+  check(hist.totals.flac === 1 && hist.totals.mp3 === 1 && hist.totals.freed === 5e9, 'totals count the bin and emptied, not undone');
+  check(!JSON.stringify(hist).includes('/secret'), 'history carries no paths');
+  check(hist.events.find((e) => e.outcome === 'failed').error === 'rsync …: (2 left)', 'a failed job says why, without the path');
+
+  console.log('spectrograms');
+  let sp = await req('/api/spectrum/2/flac/0');
+  check(sp.status === 200 && sp.headers.get('content-type') === 'image/png' && (await sp.arrayBuffer()).byteLength > 1000, 'a spectrogram is drawn');
+  check(fs.readdirSync(path.join(STATE, 'spectra')).filter((f) => f.endsWith('.png') && !f.includes('tmp')).length === 1, 'and kept');
+  check((await req('/api/spectrum/1/flac/1')).status === 404, 'not for a path outside the music folders');
+  check((await req('/api/spectrum/1/flac/2')).status === 404, 'nor through a symlink');
+  check((await req('/api/spectrum/2/mp3/0')).status === 404, 'nor for a track that is not there');
+  check((await req('/api/cover/1/flac')).status === 404 && (await req('/api/cover/1/wav')).status === 404, 'side covers only by side name');
 
   console.log('audio');
   let r = await req('/api/audio/1/flac/0', { headers: { Range: 'bytes=100-199' } });
@@ -86,7 +119,7 @@ try {
   check((await req('/api/audio/1/flac/1')).status === 404, 'a queued path outside the music folders is refused');
   check((await req('/api/audio/1/flac/2')).status === 404, 'a symlink out of the music folders is refused');
   check((await req('/api/audio/1/flac/9')).status === 404, 'an index past the end is refused');
-  check((await req('/api/audio/2/flac/0')).status === 404, 'an album not in the queue is refused');
+  check((await req('/api/audio/3/flac/0')).status === 404, 'an album not in the queue is refused');
 
   console.log('decisions');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' } })).status === 403, 'no CSRF token, refused');
@@ -99,6 +132,18 @@ try {
   await new Promise((res) => setTimeout(res, 1500));
   const calls = fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n');
   check(calls.length === 1 && calls[0].endsWith('resolve 1 keep_flac'), 'engine ran with id and decision only');
+
+  console.log('several albums');
+  await new Promise((res) => setTimeout(res, 200));
+  check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_flac', ids: [1] } })).status === 403, 'no CSRF token, refused');
+  check((await req('/api/decide-many', { method: 'POST', body: { decision: 'watch_on', ids: [1] }, csrf })).status === 400, 'only the three decisions');
+  check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_mp3', ids: ['1; ls'] }, csrf })).status === 400, 'ids must be integers');
+  check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_mp3', ids: [1, 99] }, csrf })).status === 400, 'refused when no album allows it');
+  r = await req('/api/decide-many', { method: 'POST', body: { decision: 'refetch', ids: [2, 1, 99, 2] }, csrf });
+  check(r.status === 202 && (await r.json()).n === 2, 'albums that allow it start one job');
+  await new Promise((res) => setTimeout(res, 1500));
+  const many = fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop();
+  check(many.endsWith('resolve-many refetch 2,1'), `engine gets the decision and integer ids (${many})`);
 
   console.log('track tools');
   await new Promise((res) => setTimeout(res, 200));

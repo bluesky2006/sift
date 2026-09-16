@@ -16,6 +16,7 @@
     <a href="#/" class="brand"><img src="/icon.svg" alt="" width="26" height="26">Sift</a>
     <nav>
       <button id="check" class="ghost">Check now</button>
+      <a href="#/history" class="ghost">History</a>
       <a href="#/bin" id="binlink" class="ghost">Bin</a>
       <button id="logout" class="ghost">Sign out</button>
     </nav>
@@ -36,9 +37,17 @@
     <div class="pinfo">
       <div class="plabel"><span class="side" id="pside"></span><span id="ptitle"></span></div>
       <div class="pbar"><span id="ptime">0:00</span><input type="range" id="seek" min="0" max="0" step="0.1" value="0"><span id="plen">0:00</span></div>
+      <div class="pextra"><label class="mini"><input type="checkbox" id="match">Match volume</label><span id="pdiff"></span></div>
     </div>
     <button id="ab" class="ab" title="Same moment in the other version">A/B</button>
     <button id="pclose" class="ghost small" aria-label="Close player">✕</button>
+  </div>
+  <div class="selbar" id="selbar" hidden>
+    <span id="selcount"></span>
+    <button data-many="keep_flac" class="primary">Keep FLAC</button>
+    <button data-many="keep_mp3">Keep MP3</button>
+    <button data-many="refetch">Get a better FLAC</button>
+    <button id="selcancel" class="ghost">Cancel</button>
   </div>
   <audio id="audio" preload="none"></audio>
   <audio id="audio2" preload="none"></audio>
@@ -53,6 +62,20 @@
         <button type="button" id="dcancel" class="ghost">Cancel</button>
         <button value="ok" id="dok" class="primary">OK</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="keys">
+    <form method="dialog">
+      <h3>Keyboard shortcuts</h3>
+      <table class="keytable">
+        <tr><th><kbd>Space</kbd></th><td>Play or pause</td></tr>
+        <tr><th><kbd>A</kbd></th><td>A/B: the same moment in the other version</td></tr>
+        <tr><th><kbd>←</kbd> <kbd>→</kbd></th><td>Back or forward 10 seconds</td></tr>
+        <tr><th><kbd>↑</kbd> <kbd>↓</kbd></th><td>Previous or next track</td></tr>
+        <tr><th><kbd>Esc</kbd></th><td>Leave pairing, ordering or spectrograms</td></tr>
+        <tr><th><kbd>?</kbd></th><td>This list</td></tr>
+      </table>
+      <div class="dbuttons"><button value="ok" class="primary">Close</button></div>
     </form>
   </dialog>
   <div class="toast" id="toast" hidden></div>

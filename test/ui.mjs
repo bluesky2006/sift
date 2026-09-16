@@ -37,9 +37,16 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       cover: false, _files: { flac: [], mp3: [] } },
     { id: 2, artist: 'Other', title: 'Fine', queue: 'ready', reasons: ['Every track matches'],
       allowed: ['keep_flac', 'refetch', 'watch'], watch: true, reorder: true,
-      flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
+      flac: { tracks: [{ ...t('A', 60), lufs: -11, cutoff: 22050 }], seconds: 60,
+        details: { release: 'aaaaaaaa-1111-2222-3333-444444444444', date: '2012-03-01', original: '1971-05-10', label: 'Rhino', tags: { catalognumber: 'R2 1234' } } },
+      mp3: { tracks: [{ ...t('A', 60), lufs: -14, cutoff: 16000 }], seconds: 60,
+        details: { release: 'bbbbbbbb-1111-2222-3333-444444444444', date: '1971-05-10', original: '1971-05-10', label: 'Cotillion', tags: {} } },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false,
       _files: { flac: [path.join(MEDIA, 'a.flac')], mp3: [path.join(MEDIA, 'a.mp3')] } },
+    { id: 3, artist: 'Faker', title: 'Transcode', queue: 'suspect', reasons: ['Possibly a converted MP3: 1 of 1 FLAC tracks stop around 16.0 kHz'],
+      allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, suspect: { low: 1, of: 1, hz: 16000, mp3_hz: 16000 },
+      flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
+      pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -70,7 +77,30 @@ try {
   await page.waitForSelector('.queue');
   check(await page.locator('#approve').textContent() === 'Approve all 1', 'Ready queue offers Approve all');
   check((await page.locator('.qhead h2').allTextContents()).some((s) => s.startsWith('Different')), 'queues render');
-  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Different or unconfirmed 1', 'section links with counts');
+  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 1', 'section links with counts');
+  check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a suspect album shows where its FLAC stops');
+
+  console.log('search, sort, select');
+  await page.fill('#search', 'fine');
+  await page.waitForTimeout(200);
+  check(await page.locator('a.row').count() === 1 && (await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1', 'search filters every queue');
+  await page.fill('#search', 'zzz');
+  check((await page.locator('#queues').textContent()).includes('No album matches'), 'and says when nothing matches');
+  await page.fill('#search', '');
+  await page.selectOption('#sort', 'arrived');
+  check(await page.evaluate(() => localStorage.getItem('sift-sort')) === 'arrived', 'sort is remembered');
+  await page.click('#selecting');
+  check(await page.locator('input.pick').count() === 3 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
+  await page.click('[data-all="ready"]');
+  await page.locator('input[data-pick="3"]').check();
+  check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
+  check((await page.locator('[data-many="keep_mp3"]').textContent()) === 'Keep MP3 (1)', 'a decision says how many albums it applies to');
+  await page.click('[data-many="refetch"]');
+  check((await page.locator('#dtitle').textContent()) === 'Get a better FLAC for 2 albums?', 'confirm names the count');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => /resolve-many refetch (2,3|3,2)$/.test(c)), 'the selection goes as one job');
+  check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
   await page.click('.jump a[data-jump="different"]');
   await page.waitForTimeout(500);
   check(await page.evaluate(() => Math.abs(document.getElementById('q-different').getBoundingClientRect().top) < 80
@@ -159,6 +189,55 @@ try {
   d = await decks();
   check(!d.find((x) => x.src.endsWith('/mp3/0')).paused && d.find((x) => x.src.endsWith('/flac/0')).paused, 'and back again');
 
+  console.log('volume matching');
+  check((await page.locator('#pdiff').textContent()) === 'FLAC is 3.0 dB louder', 'the player shows the loudness difference');
+  await page.check('#match');
+  await page.waitForTimeout(1500);
+  d = await decks();
+  const live = d.find((x) => !x.paused);
+  check(live && live.t > 0 && (await page.locator('#pdiff').textContent()).endsWith('matched'), 'matching keeps it playing');
+  const g = Object.fromEntries(await page.evaluate(() => decks.map((dk) =>
+    [dk.getAttribute('src').includes('/flac/') ? 'flac' : 'mp3', Math.round(gains.get(dk).gain.value * 1000) / 1000])));
+  check(g.flac === 0.708 && g.mp3 === 1, `the louder FLAC is turned down 3 dB (${JSON.stringify(g)})`);
+
+  console.log('keyboard');
+  await page.keyboard.press(' ');
+  await page.waitForTimeout(200);
+  check((await decks()).every((x) => x.paused), 'Space pauses');
+  await page.keyboard.press(' ');
+  await page.waitForTimeout(300);
+  const t0 = (await decks()).find((x) => !x.paused).t;
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(200);
+  check((await decks()).find((x) => !x.paused).t > t0 + 8, 'Right arrow skips 10 seconds');
+  const sideBefore = await page.locator('#pside').textContent();
+  await page.keyboard.press('a');
+  await page.waitForTimeout(300);
+  check((await page.locator('#pside').textContent()) !== sideBefore, 'A switches version');
+  await page.keyboard.press('?');
+  check(await page.locator('#keys').isVisible(), '? lists the shortcuts');
+  await page.keyboard.press('Escape');
+  await page.click('#pclose');
+
+  console.log('release details and spectrograms');
+  const said = await page.locator('#facts summary').textContent();
+  check(said.includes('FLAC is the 2012 reissue; MP3 is the 1971 original.'), `details say which release is which (${said})`);
+  await page.click('#facts summary');
+  check(await page.locator('#facts tr.differ').count() === 3, 'differences are highlighted: release, year, label');
+  check((await page.locator('#facts').textContent()).includes('R2 1234'), 'catalogue number from the tags');
+  check(await page.locator('.tmeta .low').count() === 0 && (await page.locator('.tmeta').first().textContent()).includes('to 16.0 kHz'), 'tracks show where they stop');
+  await page.click('#tspectra');
+  await page.waitForSelector('.spec img');
+  await page.waitForFunction(() => [...document.querySelectorAll('.spec img')].every((i) => i.complete && i.naturalWidth > 0), null, { timeout: 30000 }).catch(() => {});
+  check(await page.evaluate(() => [...document.querySelectorAll('.spec img')].map((i) => i.naturalWidth > 0)).then((v) => v.length === 2 && v.every(Boolean)), 'both versions get a spectrogram');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  check(await page.locator('.spec').count() === 0 && await page.locator('[data-decide]').count() > 0, 'Esc leaves spectrograms');
+
+  await page.goto(BASE + '/app#/album/3');
+  await page.waitForSelector('.tmeta');
+  check(await page.locator('.tmeta .low').count() === 1, 'a FLAC track stopping short is marked');
+
   console.log('one album and bin view');
   await openAlbum();
   await page.click('#tone');
@@ -170,6 +249,9 @@ try {
   await page.evaluate(() => { location.hash = '#/bin'; });
   await page.waitForSelector('.binrow');
   check((await page.locator('.binrow .rreason').textContent()).startsWith('FLAC tracks renumbered'), 'bin names a reorder');
+  await page.evaluate(() => { location.hash = '#/history'; });
+  await page.waitForSelector('.tiles');
+  check((await page.locator('.histrow .rtitle').first().textContent()) === 'Band — Record' && await page.locator('.tile').count() === 4, 'history lists decisions with totals');
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {
   await browser.close();

@@ -10,6 +10,9 @@ rules to keep and the lessons from the first build, are in `~/notes/sift-feature
   Emptying the bin is the only delete.
 - Classification lives in `~/claude-roon/flac_migrate.py` (outside this repo). Bump
   `MATCH_VERSION` there whenever fingerprint matching changes.
+- `SUSPECT_HZ` in `bin/sift.py` was calibrated on the queue on 16 Sep 2026. Recalibrate on
+  known-genuine albums before moving it. Changing how cutoff or loudness is measured means
+  clearing `cutoff`/`lufs` from the check cache, since cached values are kept.
 - `/mnt/roon-data` is NTFS: files deleted while open linger as `.fuse_hidden*`. Stop playback
   before moving files.
 - No API keys in the repo; they are read from each Lidarr's `config.xml`.

@@ -6,6 +6,7 @@
     sift.py approve-ready              keep_flac for everything in the Ready queue
     sift.py undo ENTRY                 reverse a decision that is still in the bin
     sift.py empty-bin                  delete everything in the bin - the only delete there is
+    sift.py resolve-many DECISION IDS  keep_flac | keep_mp3 | refetch for ids 1,2,3, one bin entry each
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
 
     sift.py pair ID M F                MP3 track M is FLAC track F (indexes into the album)
@@ -14,15 +15,18 @@
     sift.py reorder ID 2,0,1,...       renumber and rename FLAC tracks into this order
     sift.py one-album ID on|off        the whole FLAC folder is this album
 
-The web app only ever runs the first five, with an album id or bin entry id it has checked
+The web app only ever runs the first six, with an album id or bin entry id it has checked
 against queue.json / bin.json. Every path comes from those files, never from the browser.
 
 Classification is flac_migrate.build_plan(), the same code the migration used, so an album
 lands in Ready only after every FLAC file passes `flac -t` and every MP3 track matches a
-FLAC track by fingerprint.
+FLAC track by fingerprint, and most FLAC tracks reach above SUSPECT_HZ (a FLAC that stops
+lower is usually a converted MP3, and waits in Suspect FLAC instead).
 """
-import fcntl, json, os, re, shutil, subprocess, sys, time, urllib.request, uuid
-from datetime import datetime
+import base64, collections, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
+    urllib.request, uuid, zlib
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.expanduser("~/claude-roon"))
 import flac_migrate as fm
@@ -40,6 +44,8 @@ CONF = {
     "damaged": os.path.join(fm.HERE, "flac-damaged.json"),
     "flac_api": fm.FLAC_API, "flac_config": "/DATA/AppData/lidarr-flac/config/config.xml",
     "mp3_api": "http://localhost:8686/api/v1", "mp3_config": "/DATA/AppData/lidarr/config/config.xml",
+    "flac_db": fm.FLAC_DB, "mp3_db": fm.MP3_DB,
+    "jot_url": "http://127.0.0.1:8300/api/jot", "jot_auth": os.path.expanduser("~/scribeandjot/auth.json"),
 }
 if os.environ.get("SIFT_CONF"):                    # the test suite's sandbox
     CONF.update(json.load(open(os.environ["SIFT_CONF"])))
@@ -50,10 +56,19 @@ COVERS = os.path.join(STATE, "covers")
 # Simon's own calls on an album: tracks he paired by hand, folders he says are one album
 OVERRIDES = os.path.join(STATE, "overrides.json")
 LOG = os.path.join(STATE, "sift.log")
+# what left bin.json: emptied, undone, or failed partway through a batch
+HISTORY = os.path.join(STATE, "history.json")
+NOTIFY = os.path.join(STATE, "notify.json")
 
 QUEUES = {"retire": "ready", "no_mp3": "ready", "unconfirmed": "different",
           "keep_mp3": "lineup", "damaged": "damaged", "manual": "look",
           "collision": "look", "wait": "arriving"}
+
+# A FLAC made from an MP3 has nothing above the MP3's lowpass. Measured on 16 Sep 2026 across
+# the queue: CD-rate FLACs reach 21-22 kHz, LAME 320 stops near 20 kHz, 192 kbps near 19 kHz,
+# 128 kbps near 16 kHz. Old tape and lo-fi recordings can stop lower too, so it's a flag.
+SUSPECT_HZ = 20500
+MEASURE_SECONDS = 60       # the spectrum is taken over this much from the middle of a track
 
 
 def log(msg):
@@ -116,10 +131,9 @@ def rescan(inst):
 # ---- queue ---------------------------------------------------------------------
 
 def cover(item_id, side, folders, files):
-    """Save one picture for the album, from a folder image or embedded art. `side` only
-    says where it was looked for; the FLAC's is tried first."""
+    """Save one picture for this side of the album, from a folder image or embedded art."""
     os.makedirs(COVERS, exist_ok=True)
-    out = os.path.join(COVERS, f"{item_id}.jpg")
+    out = os.path.join(COVERS, f"{item_id}-{side}.jpg")
     if os.path.exists(out):
         return True
     for d in folders:
@@ -150,9 +164,62 @@ def cover(item_id, side, folders, files):
     return False
 
 
-def tracks(files, flac=False):
-    if flac:
+def covers(item_id, flac_folders, flac_files, mp3_folders, mp3_files):
+    """Both sides' pictures, and the album's own picture: the FLAC's, else the MP3's."""
+    sides = {"flac": cover(item_id, "flac", flac_folders, flac_files),
+             "mp3": bool(mp3_files) and cover(item_id, "mp3", mp3_folders, mp3_files)}
+    main = os.path.join(COVERS, f"{item_id}.jpg")
+    if not os.path.exists(main):
+        for side in ("flac", "mp3"):
+            if sides[side]:
+                shutil.copyfile(os.path.join(COVERS, f"{item_id}-{side}.jpg"), main)
+                break
+    return os.path.exists(main), [k for k, v in sides.items() if v]
+
+
+def measure(path):
+    """Where the spectrum stops, and integrated loudness (EBU R128), from one decode.
+    Cached with the file's other facts, so it is redone only when the file changes."""
+    e = fm.file_entry(path)
+    if "cutoff" in e and "lufs" in e:
+        return e
+    secs = fm.duration(path) or 0
+    start = max(0.0, secs / 2 - MEASURE_SECONDS / 2)
+    w, h = 128, 512
+    graph = (f"[0:a]asplit=2[l][s];[l]ebur128=framelog=quiet,anullsink;"
+             f"[s]atrim=start={start:.1f}:duration={MEASURE_SECONDS},aformat=channel_layouts=mono,"
+             f"showspectrumpic=s={w}x{h}:legend=0:saturation=0:win_func=bharris[v]")
+    cutoff = lufs = None
+    try:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-v", "info", "-i", path,
+                            "-filter_complex", graph, "-map", "[v]", "-frames:v", "1",
+                            "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                           capture_output=True, timeout=600)
+        err = r.stderr.decode("utf-8", "replace")
+        rate = re.search(r"Audio: .*?, (\d+) Hz", err)
+        if len(r.stdout) == w * h and rate:
+            # rows run from the top of the spectrum down; a row counts once its mean
+            # brightness is off the floor, which a genuine recording's noise always is
+            rows = [sum(r.stdout[y * w:(y + 1) * w]) / w for y in range(h)]
+            if max(rows) >= 20:                      # not silence
+                top = next(y for y, v in enumerate(rows) if v >= 1)
+                cutoff = round((h - top) * int(rate.group(1)) / 2 / h)
+        found = re.findall(r"I:\s+(-?[\d.]+) LUFS", err)
+        if found and float(found[-1]) > -70:
+            lufs = float(found[-1])
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    with fm._cache_lock:
+        e["cutoff"], e["lufs"] = cutoff, lufs
+    return e
+
+
+def tracks(files, flac=False, checks=True):
+    if flac and checks:
         fm.flac_damaged(files)
+    if checks:
+        with ThreadPoolExecutor(6) as ex:
+            list(ex.map(measure, files))
     out = []
     for p in files:
         i = fm.file_info(p)
@@ -161,8 +228,89 @@ def tracks(files, flac=False):
         if flac and i.get("damaged"):
             t["damaged"] = True
             t["decoded_s"] = i.get("decoded_s")
+        if checks:
+            t["cutoff"], t["lufs"] = i.get("cutoff"), i.get("lufs")
         out.append(t)
     return out
+
+
+def suspect(item):
+    """Flag an album whose FLAC tracks mostly stop short, as a converted MP3's would."""
+    cuts = [t["cutoff"] for t in item["flac"]["tracks"] if t.get("cutoff")]
+    low = sorted(c for c in cuts if c < SUSPECT_HZ)
+    item["suspect"] = None
+    if cuts and len(low) * 2 > len(cuts):
+        mp3 = sorted(t["cutoff"] for t in (item["mp3"] or {}).get("tracks", []) if t.get("cutoff"))
+        item["suspect"] = {"low": len(low), "of": len(cuts), "hz": low[len(low) // 2],
+                           "mp3_hz": mp3[len(mp3) // 2] if mp3 else None}
+        note = (f"Possibly a converted MP3: {len(low)} of {len(cuts)} FLAC tracks stop around "
+                f"{low[len(low) // 2] / 1000:.1f} kHz")
+        if item["suspect"]["mp3_hz"]:
+            note += f" (the MP3 stops around {item['suspect']['mp3_hz'] / 1000:.1f} kHz)"
+        item["reasons"].insert(0, note)
+        item["_reasons"].insert(0, note)
+    return item
+
+
+# ---- release details -----------------------------------------------------------
+
+TAGS = ["album", "albumartist", "date", "originaldate", "label", "catalognumber", "barcode",
+        "media", "releasecountry", "releasestatus", "musicbrainz_albumid",
+        "musicbrainz_releasegroupid", "genre"]
+_releases = {}
+
+
+def releases(inst):
+    """Every album's release as Lidarr knows it: the release its files were imported as,
+    else the one it has selected. One read of the database per build."""
+    if inst in _releases:
+        return _releases[inst]
+    out = {}
+    try:
+        db = sqlite3.connect(CONF[f"{inst}_db"], uri=True)
+        rows = db.execute("""
+            select a.Id, a.ForeignAlbumId, a.ReleaseDate, a.AlbumType, r.Id, r.ForeignReleaseId,
+                   r.Title, r.Disambiguation, r.ReleaseDate, r.Label, r.Country, r.Media,
+                   r.TrackCount, r.Status, r.Monitored,
+                   exists(select 1 from Tracks t where t.AlbumReleaseId = r.Id and t.TrackFileId > 0)
+            from Albums a join AlbumReleases r on r.AlbumId = a.Id""").fetchall()
+    except Exception as e:
+        log(f"WARNING: {inst} database not read for release details ({e})")
+        rows = []
+
+    def listed(raw, key=None):
+        try:
+            v = json.loads(raw or "[]")
+        except ValueError:
+            return ""
+        return ", ".join(sorted({str(x.get(key) if key else x) for x in v if (x.get(key) if key else x)}))
+    for (aid, rg, first, kind, rid, mbid, title, dis, date, label, country, media,
+         count, status, mon, has_files) in rows:
+        rank = (has_files, mon)
+        if aid in out and out[aid]["_rank"] >= rank:
+            continue
+        out[aid] = {"_rank": rank, "release": mbid, "release_group": rg,
+                    "title": title + (f" ({dis})" if dis else ""), "date": (date or "")[:10],
+                    "original": (first or "")[:10], "type": kind, "label": listed(label),
+                    "country": listed(country), "format": listed(media, "format"),
+                    "tracks": count, "status": status}
+    _releases[inst] = out
+    return out
+
+
+def details(inst, album_id, files):
+    d = {k: v for k, v in releases(inst).get(album_id, {}).items() if not k.startswith("_")} \
+        if inst and album_id else {}
+    tags = {}
+    try:
+        m = mutagen.File(files[0], easy=True) if files else None
+        for k in TAGS:
+            if m and m.get(k):
+                tags[k] = "; ".join(str(v) for v in m[k])[:200]
+    except Exception:
+        pass
+    d["tags"] = tags
+    return d
 
 
 def item_from_plan(e, hold):
@@ -186,25 +334,27 @@ def item_from_plan(e, hold):
         if has_mp3:
             allowed.append("keep_mp3")
         allowed += ["refetch", "watch"]
-    return {
+    main, sides = covers(e["flac_id"], [e["flac_dir"]], flac_files, e.get("mp3_dirs", []), mp3_files)
+    item = {
         "id": e["flac_id"], "artist": e["artist"], "title": e["title"], "queue": q,
         "status": e["status"], "reasons": reasons, "allowed": allowed,
         "watch": e.get("monitored", False),
-        "flac": {"tracks": tracks(flac_files, flac=q != "arriving"),
-                 "seconds": e.get("flac_seconds")},
-        "mp3": {"tracks": tracks(mp3_files), "seconds": e.get("mp3_seconds")} if has_mp3 else None,
+        "flac": {"tracks": tracks(flac_files, flac=True, checks=q != "arriving"),
+                 "seconds": e.get("flac_seconds"), "details": details("flac", e["flac_id"], flac_files)},
+        "mp3": {"tracks": tracks(mp3_files, checks=q != "arriving"), "seconds": e.get("mp3_seconds"),
+                "details": details("mp3", e.get("mp3_id"), mp3_files)} if has_mp3 else None,
         "pairs": [{k: t[k] for k in ("m", "f", "sim", "same")} for t in e.get("track_checks", [])],
         "foreign": bool(e.get("foreign_ids")),
         "reorder": len({os.path.dirname(p) for p in flac_files}) == 1,
         "_status": e["status"],
         "_reasons": list(reasons),
-        "cover": cover(e["flac_id"], "flac", [e["flac_dir"]], flac_files)
-                 or (has_mp3 and cover(e["flac_id"], "mp3", e["mp3_dirs"], mp3_files)),
+        "cover": main, "covers": sides,
         "_do": {"flac_dir": e["flac_dir"], "dest": e["dest"], "mp3_dirs": e.get("mp3_dirs", []),
                 "mp3_id": e.get("mp3_id"), "mbid": e["mbid"],
                 "hold": hold["hold"] if hold else None, "foreign_ids": e.get("foreign_ids", [])},
         "_files": {"flac": flac_files, "mp3": mp3_files},
     }
+    return item if q == "arriving" else suspect(item)
 
 
 def item_from_hold(k, h):
@@ -212,7 +362,8 @@ def item_from_hold(k, h):
     mp3_files = fm.folder_audio(h["mp3_dirs"])
     broken = fm.flac_damaged(flac_files)
     pairs = fm.match_tracks(mp3_files, flac_files) if mp3_files and flac_files else []
-    return {
+    main, sides = covers(int(k), [h["hold"]], flac_files, h["mp3_dirs"], mp3_files)
+    return suspect({
         "id": int(k), "artist": h["artist"], "title": h["title"], "queue": "damaged",
         "status": "damaged",
         "reasons": [f"{len(broken)} FLAC file(s) fail flac -t",
@@ -220,9 +371,11 @@ def item_from_hold(k, h):
         "allowed": (["keep_mp3"] if mp3_files else []) + ["refetch", "watch"],
         "watch": h.get("watch", True),
         "flac": {"tracks": tracks(flac_files, flac=True),
-                 "seconds": round(sum(fm.duration(p) or 0 for p in flac_files), 1)},
+                 "seconds": round(sum(fm.duration(p) or 0 for p in flac_files), 1),
+                 "details": details("flac", int(k), flac_files)},
         "mp3": {"tracks": tracks(mp3_files),
-                "seconds": round(sum(fm.duration(p) or 0 for p in mp3_files), 1)}
+                "seconds": round(sum(fm.duration(p) or 0 for p in mp3_files), 1),
+                "details": details("mp3", h.get("mp3_id"), mp3_files)}
                if mp3_files else None,
         "pairs": [{k2: t[k2] for k2 in ("m", "f", "sim", "same")} for t in pairs],
         "foreign": False,
@@ -230,12 +383,11 @@ def item_from_hold(k, h):
         "_status": "damaged",
         "_reasons": [f"{len(broken)} FLAC file(s) fail flac -t",
                      "Held in FLAC-damaged; the MP3 is the copy in Roon"],
-        "cover": cover(int(k), "flac", [h["hold"]], flac_files)
-                 or cover(int(k), "mp3", h["mp3_dirs"], mp3_files),
+        "cover": main, "covers": sides,
         "_do": {"flac_dir": None, "dest": None, "mp3_dirs": h["mp3_dirs"],
                 "mp3_id": h.get("mp3_id"), "mbid": h["mbid"], "hold": h["hold"], "foreign_ids": []},
         "_files": {"flac": flac_files, "mp3": mp3_files},
-    }
+    })
 
 
 def apply_overrides(item, ov):
@@ -271,7 +423,107 @@ def apply_overrides(item, ov):
         item["queue"] = "ready" if all_same else "different"
         if all_same and item["_status"] == "unconfirmed":
             item["reasons"][0:0] = ["Every track matches, counting the pairs set by hand"]
+    # a probable converted MP3 never waits in Ready, whatever else it passes
+    if item.get("suspect") and item["queue"] in ("ready", "different", "lineup"):
+        item["queue"] = "suspect"
     return item
+
+
+# ---- library duplicates --------------------------------------------------------
+# /mnt/roon-music/FLAC predates Lidarr-FLAC and holds some albums the MP3 library also has.
+# Neither folder came through Soularr, so they're found by folder name alone.
+
+DUPE_BASE = 900_000_000     # ids above every Lidarr album id, stable for a given FLAC folder
+
+
+def dupe_id(flac_dir):
+    return DUPE_BASE + zlib.crc32(flac_dir.encode()) % 100_000_000
+
+
+def album_folders(root):
+    out = []
+    try:
+        artists = sorted(os.listdir(root))
+    except OSError:
+        return out
+    for a in artists:
+        ad = os.path.join(root, a)
+        if not os.path.isdir(ad) or a == "Sift-bin":
+            continue
+        for d in sorted(os.listdir(ad)):
+            if os.path.isdir(os.path.join(ad, d)):
+                out.append((a, d, os.path.join(ad, d)))
+    return out
+
+
+def mp3_owners():
+    """MP3 file path -> the MP3 Lidarr album that holds it, if the database can be read."""
+    try:
+        return fm.mp3_albums()[2]
+    except Exception:
+        return {}
+
+
+def find_dupes(taken):
+    """FLAC library folders whose artist and album names match an MP3 folder: same title,
+    and one artist name inside the other, as mp3_folder_named() matches. `taken` holds
+    folders the review queue already covers."""
+    index = collections.defaultdict(list)
+    for a, d, path in album_folders(CONF["mp3_root"]):
+        if path not in taken:
+            index[fm.squash(d)].append((fm.squash(a), path))
+    found = []
+    for a, d, path in album_folders(CONF["flac_dest"]):
+        want = fm.squash(a)
+        mp3 = [p for have, p in index.get(fm.squash(d), [])
+               if want and have and (want in have or have in want)]
+        if mp3 and path not in taken:
+            found.append({"artist": a, "title": d, "flac_dir": path, "mp3_dirs": mp3})
+    return found
+
+
+def item_from_dupe(d, owners):
+    flac_files = fm.folder_audio([d["flac_dir"]])
+    mp3_files = fm.folder_audio(d["mp3_dirs"])
+    if not flac_files or not mp3_files:
+        return None
+    iid = dupe_id(d["flac_dir"])
+    broken = fm.flac_damaged(flac_files)
+    pairs = fm.match_tracks(mp3_files, flac_files)
+    odd = [t for t in pairs if not t["same"]]
+    flac_s = round(sum(fm.duration(p) or 0 for p in flac_files), 1)
+    mp3_s = round(sum(fm.duration(p) or 0 for p in mp3_files), 1)
+    reasons = []
+    if broken:
+        reasons.append(f"{len(broken)} FLAC file(s) fail flac -t")
+    if len(d["mp3_dirs"]) > 1:
+        reasons.append(f"{len(d['mp3_dirs'])} MP3 folders have this name")
+    if len(flac_files) < len(mp3_files):
+        reasons.append("FLAC has fewer tracks")
+    if odd:
+        reasons.append(f"{len(odd)} MP3 track(s) not fingerprint-matched")
+    if not reasons:
+        reasons.append("Every track matches, and every FLAC file decodes cleanly")
+    reasons.append("Both copies are in the Roon library already")
+    ids = {owners.get(p) for p in mp3_files} - {None}
+    main, sides = covers(iid, [d["flac_dir"]], flac_files, d["mp3_dirs"], mp3_files)
+    item = {
+        "id": iid, "artist": d["artist"], "title": d["title"], "queue": "dupes",
+        "status": "dupe", "reasons": reasons, "watch": False, "dupe": True,
+        "allowed": (["keep_flac"] if not broken and len(d["mp3_dirs"]) == 1 else []) + ["keep_mp3"],
+        "flac": {"tracks": tracks(flac_files, flac=True), "seconds": flac_s,
+                 "details": details(None, None, flac_files)},
+        "mp3": {"tracks": tracks(mp3_files), "seconds": mp3_s,
+                "details": details("mp3", next(iter(ids)) if len(ids) == 1 else None, mp3_files)},
+        "pairs": [{k: t[k] for k in ("m", "f", "sim", "same")} for t in pairs],
+        "foreign": False, "reorder": False,
+        "_status": "dupe", "_reasons": list(reasons),
+        "cover": main, "covers": sides,
+        "_do": {"kind": "dupe", "flac_dir": d["flac_dir"], "mp3_dirs": d["mp3_dirs"],
+                "mp3_id": next(iter(ids)) if len(ids) == 1 else None, "hold": None, "foreign_ids": []},
+        "_files": {"flac": flac_files, "mp3": mp3_files},
+    }
+    return suspect(item)
 
 
 def build_queue():
@@ -283,6 +535,9 @@ def build_queue():
     items = [item_from_plan(e, hold.get(str(e["flac_id"]))) for e in plan]
     items += [item_from_hold(k, h) for k, h in hold.items()
               if int(k) not in seen_ids and os.path.isdir(h["hold"])]
+    taken = {d for i in items for d in [i["_do"].get("dest"), *i["_do"].get("mp3_dirs", [])] if d}
+    owners = mp3_owners()
+    items += [i for i in (item_from_dupe(d, owners) for d in find_dupes(taken)) if i]
     for i in items:
         apply_overrides(i, ov.get(str(i["id"])))
     fm.save_cache()
@@ -318,6 +573,55 @@ def check():
     for i in q["items"]:
         counts[i["queue"]] = counts.get(i["queue"], 0) + 1
     log(f"check: {counts} in {time.time() - t:.0f}s")
+    try:
+        notify(q["items"])
+    except Exception as e:
+        log(f"WARNING: jot not sent ({e})")
+
+
+# ---- telling Simon -------------------------------------------------------------
+
+def jot_cookie():
+    """A short JotScribe session, signed the way its server signs one (see its makeSession)."""
+    secret = json.load(open(CONF["jot_auth"]))["secret"]
+    payload = base64.urlsafe_b64encode(json.dumps(
+        {"exp": int((time.time() + 300) * 1000)}).encode()).rstrip(b"=").decode()
+    mac = base64.urlsafe_b64encode(hmac.new(secret.encode(), payload.encode(), hashlib.sha256)
+                                   .digest()).rstrip(b"=").decode()
+    return f"mdedit_sid={payload}.{mac}"
+
+
+def notify(items):
+    """Jot when albums have arrived that need a decision. At most once a day; albums already
+    told about are remembered, so nothing is announced twice. The first run only records
+    what is already waiting."""
+    state = fm.load_json(NOTIFY, None)
+    waiting = {i["id"]: i for i in items if i["queue"] != "arriving"}
+    if state is None:
+        fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": None})
+        return
+    told = set(state.get("told", []))
+    new = [i for k, i in waiting.items() if k not in told]
+    last = state.get("sent")
+    if not new or (last and datetime.fromisoformat(last) > datetime.now() - timedelta(days=1)):
+        return
+    ready = [i for i in new if i["queue"] == "ready"]
+    review = len(new) - len(ready)
+    parts = [f"{len(ready)} new album{'s' * (len(ready) != 1)} ready"] if ready else []
+    if review:
+        parts.append(f"{review} to review")
+    lines = [f"{i['artist']} — {i['title']}" + ("" if i["queue"] == "ready" else f" ({i['queue']})")
+             for i in sorted(new, key=lambda i: (i["queue"] != "ready", i["artist"].casefold()))]
+    body = "\n".join(lines[:40] + ([f"…and {len(lines) - 40} more"] if len(lines) > 40 else [])
+                     + ["", "http://100.70.110.7:8305"])
+    req = urllib.request.Request(
+        CONF["jot_url"], method="POST",
+        data=json.dumps({"subject": "Sift: " + ", ".join(parts), "body": body}).encode(),
+        headers={"Content-Type": "application/json", "Cookie": jot_cookie()})
+    urllib.request.urlopen(req, timeout=30).read()
+    # albums decided since drop out, so one that comes back (a re-fetch) is announced again
+    fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": now()})
+    log(f"jot sent: {', '.join(parts)}")
 
 
 # ---- the bin and moves ---------------------------------------------------------
@@ -529,7 +833,22 @@ def refetch(item, en):
     en.monitor("flac", item["id"], True)
 
 
+def dupe_keep_flac(item, en):
+    """The FLAC is already in the library, so only the MP3 moves: into the bin."""
+    do = item["_do"]
+    if len(do["mp3_dirs"]) != 1:
+        raise RuntimeError("several MP3 folders have this name; decide in the shell")
+    en.to_bin(do["mp3_dirs"][0])
+    if do["mp3_id"]:
+        en.monitor("mp3", do["mp3_id"], False)
+
+
+def dupe_keep_mp3(item, en):
+    en.to_bin(item["_do"]["flac_dir"])
+
+
 DECISIONS = {"keep_flac": keep_flac, "keep_mp3": keep_mp3, "refetch": refetch}
+DUPE_DECISIONS = {"keep_flac": dupe_keep_flac, "keep_mp3": dupe_keep_mp3}
 
 
 # ---- track tools ---------------------------------------------------------------
@@ -711,8 +1030,9 @@ def decide(item, decision):
     if decision not in item["allowed"]:
         raise RuntimeError(f"{decision} is not available for this album")
     en = Entry(decision, item)
+    table = DUPE_DECISIONS if item["_do"].get("kind") == "dupe" else DECISIONS
     try:
-        DECISIONS[decision](item, en)
+        table[decision](item, en)
     except Exception as e:
         errors = undo_ops(en.d["ops"])
         log(f"FAILED {decision} {en.d['label']}: {e}"
@@ -745,19 +1065,40 @@ def resolve(album_id, decision):
         refresh_queue({album_id})
 
 
-def approve_ready():
+def resolve_many(decision, ids, only_queue=None):
+    """One decision for several albums, each its own bin entry so each undoes on its own.
+    An album that fails is rolled back and skipped; the rest go ahead."""
     with Lock():
-        ready = [i for i in fm.load_json(QUEUE, {}).get("items", []) if i["queue"] == "ready"]
+        items = [i for i in fm.load_json(QUEUE, {}).get("items", [])
+                 if (only_queue is None and i["id"] in ids) or i["queue"] == only_queue]
         done = set()
-        for i in ready:
+        for i in items:
             try:
-                decide(i, "keep_flac")
+                decide(i, decision)
                 done.add(i["id"])
             except Exception as e:
                 print(f"skipped {i['artist']} — {i['title']}: {e}", flush=True)
+                remember("failed", {"at": now(), "decision": decision, "album_id": i["id"],
+                                    "label": f"{i['artist']} — {i['title']}", "error": str(e)[:300]})
         rescan("flac"), rescan("mp3")
         refresh_queue(done)
+    return done, items
+
+
+def approve_ready():
+    done, ready = resolve_many("keep_flac", (), only_queue="ready")
     log(f"approve-ready: {len(done)} of {len(ready)} moved into the FLAC library")
+
+
+def remember(kind, record):
+    """history.json keeps what leaves bin.json, so the history page and totals outlive it."""
+    h = fm.load_json(HISTORY, {})
+    h.setdefault(kind, []).append(record)
+    fm.save_json(HISTORY, h)
+
+
+def summary(entry):
+    return {k: entry.get(k) for k in ("id", "at", "decision", "album_id", "label", "bytes")}
 
 
 def undo(entry_id):
@@ -772,6 +1113,7 @@ def undo(entry_id):
             raise SystemExit("undo incomplete: " + "; ".join(errors))
         b["entries"] = [e for e in b["entries"] if e["id"] != entry_id]
         fm.save_json(BIN, b)
+        remember("undone", {**summary(entry), "undone": now()})
         rescan("flac"), rescan("mp3")
         refresh_queue()
     log(f"undo {entry['decision']}: {entry['label']}")
@@ -793,6 +1135,8 @@ def empty_bin():
         for real in roots:
             for name in os.listdir(real):
                 shutil.rmtree(os.path.join(real, name))
+        remember("emptied", {"at": now(), "bytes": freed,
+                             "entries": [summary(e) for e in b["entries"]]})
         fm.save_json(BIN, {"entries": []})
     log(f"emptied bin: {len(b['entries'])} entries, {freed / 1e9:.1f} GB")
 
@@ -816,6 +1160,10 @@ def main():
             check()
         elif len(a) == 3 and a[0] == "resolve":
             resolve(int(a[1]), a[2])
+        elif len(a) == 3 and a[0] == "resolve-many" and a[1] in DECISIONS \
+                and re.fullmatch(r"\d+(,\d+)*", a[2]):
+            done, items = resolve_many(a[1], {int(x) for x in a[2].split(",")})
+            log(f"{a[1]} for {len(done)} of {len(items)} albums")
         elif a == ["approve-ready"]:
             approve_ready()
         elif len(a) == 2 and a[0] == "undo":
