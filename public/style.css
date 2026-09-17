@@ -45,6 +45,12 @@ input[type=password] { font: inherit; padding: 10px 12px; border-radius: 10px; b
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 20px; color: var(--text); }
 .top nav { display: flex; gap: 2px; flex-wrap: wrap; justify-content: flex-end; }
 .top nav .ghost { padding: 8px 10px; }
+@media (max-width: 480px) {                    /* all four links on one line on a phone */
+  .top { padding: 10px 8px 4px; gap: 4px; }
+  .brand { font-size: 18px; gap: 6px; }
+  .top nav { flex-wrap: nowrap; gap: 0; }
+  .top nav .ghost { padding: 8px 5px; font-size: 14px; white-space: nowrap; }
+}
 .status { color: var(--muted); font-size: 13px; margin: 0 auto; padding: 0 16px 8px; max-width: 900px; }
 main { max-width: 900px; margin: 0 auto; padding: 0 12px; }
 

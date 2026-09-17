@@ -214,7 +214,7 @@ function renderList() {
   document.title = 'Sift';
   if (!$('queues')) {
     view.innerHTML = `<div class="listtools">
-        <input type="search" id="search" placeholder="Search artist or title" autocomplete="off" aria-label="Search">
+        <input type="search" id="search" placeholder="Search" autocomplete="off" aria-label="Search">
         <select id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [name]]) => `<option value="${k}">${name}</option>`).join('')}</select>
         <button id="selecting" class="ghost">Select</button>
       </div>
@@ -248,9 +248,20 @@ function renderList() {
     $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
       + (items.length ? items.map(row).join('') : '<p class="empty">Nothing waiting.</p>') + '</section>';
   }
-  view.querySelectorAll('[data-tab]').forEach((b) => {
+  const tabs = [...view.querySelectorAll('[data-tab]')];
+  tabs.forEach((b, n) => {
+    b.tabIndex = b.getAttribute('aria-selected') === 'true' ? 0 : -1;
     b.onclick = () => { tab = b.dataset.tab; localStorage.setItem('sift-tab', tab); renderList(); window.scrollTo(0, 0); };
+    b.onkeydown = (ev) => {                       // arrows move between tabs, as a tablist should
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[ev.key];
+      if (!step) return;
+      ev.preventDefault(); ev.stopPropagation();
+      tabs[(n + step + tabs.length) % tabs.length].click();
+      $('jump').querySelector('[aria-selected=true]').focus();
+    };
   });
+  const on = $('jump').querySelector('[aria-selected=true]');
+  if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   view.querySelectorAll('[data-pick]').forEach((c) => {
     c.onchange = () => { const id = Number(c.dataset.pick); if (c.checked) selected.add(id); else selected.delete(id); renderSelection(); };
   });
