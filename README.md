@@ -14,6 +14,7 @@ the MP3 you already have and sorted into a queue:
 | Doesn't line up | Fewer tracks, a noticeably different length, or an MP3 folder shared with another album |
 | Damaged FLAC | FLAC files fail `flac -t`, including the 20 albums held in `/mnt/roon-music/FLAC-damaged` |
 | Needs a look | FLAC folder holds another album's audio, spans folders, or the destination already exists |
+| Library health | An album already in `/mnt/roon-music/FLAC` whose files fail `flac -t` or mostly stop short, from the nightly health check |
 | Library duplicates | An album in both `/mnt/roon-music/FLAC` and `/mnt/roon-music/MP3`, matched by folder name |
 | Arriving | Imported in the last 3 hours; checked next time |
 
@@ -43,14 +44,27 @@ Nothing moves until you decide in the app. Nothing is deleted until you empty th
 - Spectrograms are drawn on request by the server and kept in `spectra/`. Starting any job
   stops one being drawn, so no file is held open during a move.
 
+- A one-line diagnosis for albums in the review queues, with a suggested decision: tracks
+  missing, different edits, a same-length track to pair, a different recording. A shared MP3
+  folder whose every file matches the FLAC is this album, so Keep FLAC opens for it.
+- The Soulseek user each album came from, from slskd's `transfers.db`, with how their other
+  albums here fared. **Block** adds them to Soularr's `ignored_users` (Undo removes them).
+- Cron runs `sift.py health 150` at 01:10 under `nice`/`ionice`: 150 minutes a night of
+  `flac -t` and spectrum checks over the FLAC library, never-checked folders first, results in
+  `health.json`. **Looks fine** dismisses an album until its files change.
+
 ## In the app
 
+- After a decision, the next album in the queue opens. **Get a better FLAC** can choose the
+  release Soularr looks for (Soularr's `use_selected_lidarr_release` is on for this).
+- The bin can keep entries for a set number of days and empty only the older ones, still
+  with the password. The daily jot says how re-fetched albums came back.
 - Search, sort (artist, newest, reason), and **Select** to decide several albums at once:
   one job, one bin entry per album.
 - **Match volume** in the player turns the louder version down to the quieter one's loudness
   (Web Audio, built on the first tap that needs it).
 - **History**: every decision and what became of it, with totals.
-- Keyboard: Space, A, ←/→, ↑/↓, Esc; `?` lists them.
+- Keyboard: Space, A, ←/→, ↑/↓, J/K, 1/2/3, Esc; `?` lists them.
 
 ## Decisions
 
@@ -62,6 +76,8 @@ Nothing moves until you decide in the app. Nothing is deleted until you empty th
 | Watch for a better copy | none | FLAC monitoring on or off |
 | Keep FLAC (duplicate) | MP3 → bin; the FLAC stays | MP3 unmonitored if the MP3 Lidarr has it |
 | Keep MP3 (duplicate) | FLAC → bin | none |
+| Put in the bin (health) | FLAC → bin | none |
+| Block this user | none | Soularr's `ignored_users` gains the user |
 
 Every decision is recorded step by step in `bin.json`, so **Undo** reverses it exactly:
 files, monitoring and ledger entries. Bins are `/mnt/roon-music/Sift-bin` and

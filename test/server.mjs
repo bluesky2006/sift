@@ -125,6 +125,7 @@ try {
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' } })).status === 403, 'no CSRF token, refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'rm -rf' }, csrf })).status === 400, 'unknown decision refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_mp3' }, csrf })).status === 400, 'decision the album does not allow refused');
+  check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'bin_album' }, csrf })).status === 400, 'Put in the bin only for Library health');
   check((await req('/api/decide', { method: 'POST', body: { id: '1; ls', decision: 'keep_flac' }, csrf })).status === 400, 'non-numeric id refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 7, decision: 'keep_flac' }, csrf })).status === 404, 'album not in queue refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf })).status === 202, 'allowed decision starts a job');

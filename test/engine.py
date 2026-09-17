@@ -528,6 +528,37 @@ S.notify([q(1, "ready"), q(7, "ready"), back, q(10, "suspect")])
 check(got[-1][1]["subject"] == "Sift: 1 suspect" and "came back" not in got[-1][1]["body"], "a re-fetch is only reported once")
 srv.shutdown()
 
+print("library health")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+S.CONF.update(conf)
+S.HEALTH = f"{STATE}/health.json"
+os.makedirs(f"{MUSIC}/FLAC/Well/Fine", exist_ok=True); shutil.copy(f"{M}/real.flac", f"{MUSIC}/FLAC/Well/Fine/01.flac")
+os.makedirs(f"{MUSIC}/FLAC/Fake/Copy", exist_ok=True)
+for n in (1, 2):
+    shutil.copy(f"{M}/fake.flac", f"{MUSIC}/FLAC/Fake/Copy/0{n}.flac")
+for x in ("Art", "Art3", "Busy", "Stuck", "Tools", "Dupe Band", "Solo"):
+    shutil.rmtree(f"{MUSIC}/FLAC/{x}", ignore_errors=True)
+S.health(5)
+hr = load(S.HEALTH)["albums"]
+check(hr[f"{MUSIC}/FLAC/Fake/Copy"]["low"] == 2 and hr[f"{MUSIC}/FLAC/Well/Fine"]["low"] == 0, "the nightly check measures every album folder")
+hi = S.health_items(set())
+check([i["title"] for i in hi] == ["Copy"] and hi[0]["queue"] == "health" and hi[0]["suspect"], "only the suspect one comes up in Library health")
+check(S.health_items({f"{MUSIC}/FLAC/Fake/Copy"}) == [], "not if another queue already covers the folder")
+json.dump({"items": [hi[0]]}, open(f"{STATE}/queue.json", "w"))
+r = sift("resolve", str(hi[0]["id"]), "dismiss")
+check(r.returncode == 0 and S.health_items(set()) == [], "Looks fine dismisses it")
+open(f"{MUSIC}/FLAC/Fake/Copy/02.flac", "ab").write(b"\0")
+check(S.health_items(set()) == [], "a changed folder waits for the next night")
+S.health(5)
+check(len(S.health_items(set())) == 1, "and comes back if it's still bad")
+h2 = S.health_items(set())[0]
+json.dump({"items": [h2]}, open(f"{STATE}/queue.json", "w"))
+r = sift("resolve", str(h2["id"]), "bin_album")
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Fake") and os.path.isdir(f"{MUSIC}/FLAC"), "Put in the bin bins the album")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+check(os.path.isfile(f"{MUSIC}/FLAC/Fake/Copy/01.flac"), "and undo brings it back")
+shutil.rmtree(f"{MUSIC}/FLAC/Fake"); shutil.rmtree(f"{MUSIC}/FLAC/Well")
+
 print("empty only the old part of the bin")
 json.dump(conf, open(f"{T}/conf.json", "w"))
 os.makedirs(f"{MUSIC}/Sift-bin/oldentry/MP3/X", exist_ok=True); open(f"{MUSIC}/Sift-bin/oldentry/MP3/X/a", "w").write("x")

@@ -12,14 +12,17 @@ const QUEUES = [
   ['lineup', "Doesn't line up", 'Fewer tracks, a noticeably different length, or an MP3 folder shared with another album.'],
   ['damaged', 'Damaged FLAC', 'Files fail flac -t, usually truncated downloads.'],
   ['look', 'Needs a look', "Something about the folders means Sift won't move it for you."],
+  ['health', 'Library health', 'Albums already in the Roon FLAC library with files that fail flac -t or stop short like a converted MP3, found by the nightly check. Nothing replaces them if you bin them.'],
   ['dupes', 'Library duplicates', 'Albums in both the Roon FLAC library and the MP3 library, matched by folder name. Keep FLAC puts the MP3 in the bin; Keep MP3 puts the FLAC in the bin.'],
   ['arriving', 'Arriving', 'Imported in the last few hours; checked once Soularr has finished with them.'],
 ];
-const SHORT = { different: 'Different or unconfirmed', dupes: 'Duplicates' };
+const SHORT = { different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health' };
 const DECISION_TEXT = {
   keep_flac: ['Keep FLAC', 'The FLAC moves into the Roon FLAC library and the MP3 goes in the bin.'],
   keep_mp3: ['Keep MP3', "The FLAC goes in the bin and Soularr won't fetch this album again."],
   refetch: ['Get a better FLAC', 'The FLAC goes in the bin and Soularr looks for another copy.'],
+  bin_album: ['Put in the bin', 'The album goes in the bin, and nothing replaces it. Undo is in the bin.'],
+  dismiss: ['Looks fine', "Sift won't raise this album again unless its files change."],
 };
 // library duplicates: both copies are already in Roon, and no Lidarr fetches either
 const DUPE_TEXT = {
@@ -485,13 +488,13 @@ async function renderAlbum(id, keepMode = false) {
   const texts = a.dupe ? DUPE_TEXT : DECISION_TEXT;
   const diag = a.diagnosis;
   const primary = diag && diag.suggest && a.allowed.includes(diag.suggest) ? diag.suggest : 'keep_flac';
-  const buttons = ['keep_flac', 'keep_mp3', 'refetch'].filter((d) => a.allowed.includes(d))
-    .map((d) => `<button class="${d === primary ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
+  const buttons = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album', 'dismiss'].filter((d) => a.allowed.includes(d))
+    .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
   const near = neighbours(a);
   if (a.allowed.length) buttons.push(`<a class="button ghost" id="later" href="${near.next ? `#/album/${near.next.id}` : '#/'}">${near.next ? 'Next album' : 'Later'}</a>`);
   const watch = a.allowed.includes('watch')
     ? `<label class="switch"><input type="checkbox" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
-  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : 'No MP3',
+  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : (a.health ? 'In the FLAC library' : 'No MP3'),
     `FLAC ${clock(a.flac.seconds)} · ${a.flac.tracks.length} tracks`].join('  vs  ');
 
   view.innerHTML = `<a href="#/" class="back">← All albums</a>
@@ -805,7 +808,7 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 
 // ---- the bin -----------------------------------------------------------------
 
-const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC',
+const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC', bin_album: 'Album put in the bin',
   adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked' };
 
 function renderBin() {

@@ -55,6 +55,8 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       diagnosis: { kind: 'missing', suggest: 'refetch', text: 'The FLAC is missing 1 track the MP3 has: A.' },
       flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60), t('B', 60)], seconds: 120, details: { release: 'r-2', tags: {} } },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }, { m: 1, f: null, sim: null, same: false }], cover: false, _files: { flac: [], mp3: [] } },
+    { id: 800000001, artist: 'Old', title: 'Library Rip', queue: 'health', reasons: ['2 FLAC file(s) fail flac -t'], allowed: ['bin_album', 'dismiss'],
+      health: true, flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -86,7 +88,7 @@ try {
   await page.waitForSelector('.queue');
   check(await page.locator('#approve').textContent() === 'Approve all 1', 'Ready queue offers Approve all');
   check((await page.locator('.qhead h2').allTextContents()).some((s) => s.startsWith('Different')), 'queues render');
-  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2', 'section links with counts');
+  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'section links with counts');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a suspect album shows where its FLAC stops');
 
   console.log('search, sort, select');
@@ -99,7 +101,7 @@ try {
   await page.selectOption('#sort', 'arrived');
   check(await page.evaluate(() => localStorage.getItem('sift-sort')) === 'arrived', 'sort is remembered');
   await page.click('#selecting');
-  check(await page.locator('input.pick').count() === 4 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
+  check(await page.locator('input.pick').count() === 5 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
   await page.click('[data-all="ready"]');
   await page.locator('input[data-pick="3"]').check();
   check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
@@ -270,6 +272,17 @@ try {
   await page.click('#dok');
   await page.waitForSelector('.diag >> text=missing', { timeout: 8000 }).catch(() => {});
   check(calls().some((c) => c.endsWith('resolve 1 keep_mp3')) && page.url().endsWith('#/album/4'), 'after the decision, the next album opens');
+
+  console.log('library health');
+  await page.goto(BASE + '/app#/album/800000001');
+  await page.waitForSelector('[data-decide="dismiss"]');
+  check((await page.locator('.decisions button').allTextContents()).join('|') === 'Put in the bin|Looks fine', 'a Library health album offers Put in the bin or Looks fine');
+  await page.click('[data-decide="dismiss"]');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('resolve 800000001 dismiss')), 'Looks fine is sent');
+  await page.goto(BASE + '/app#/album/4');
+  await page.waitForSelector('[data-decide="refetch"]');
 
   console.log('choosing a release');
   await page.click('[data-decide="refetch"]');

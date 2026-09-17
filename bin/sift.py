@@ -8,6 +8,7 @@
     sift.py undo ENTRY                 reverse a decision that is still in the bin
     sift.py empty-bin [DAYS]           delete everything in the bin, or entries older than DAYS - the only delete
     sift.py resolve-many DECISION IDS  keep_flac | keep_mp3 | refetch for ids 1,2,3, one bin entry each
+    sift.py health MINUTES             check the FLAC library for damaged or converted files, for so long
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
 
     sift.py pair ID M F                MP3 track M is FLAC track F (indexes into the album)
@@ -63,6 +64,8 @@ LOG = os.path.join(STATE, "sift.log")
 # what left bin.json: emptied, undone, or failed partway through a batch
 HISTORY = os.path.join(STATE, "history.json")
 NOTIFY = os.path.join(STATE, "notify.json")
+# the nightly check of the whole FLAC library: results per album folder, and dismissals
+HEALTH = os.path.join(STATE, "health.json")
 
 QUEUES = {"retire": "ready", "no_mp3": "ready", "unconfirmed": "different",
           "keep_mp3": "lineup", "damaged": "damaged", "manual": "look",
@@ -712,6 +715,105 @@ def item_from_dupe(d, owners):
     return suspect(item)
 
 
+# ---- health of the FLAC library ---------------------------------------------------
+# /mnt/roon-music/FLAC was never checked. A nightly job at low priority runs flac -t and the
+# spectrum measurement over it a slice at a time; albums with damaged or suspect files come
+# up in Library health. It is ext4, so reading while Roon plays is harmless.
+
+HEALTH_BASE = 800_000_000
+
+
+def folder_sig(files):
+    st = [os.stat(p) for p in files]
+    return [len(files), sum(x.st_size for x in st), max((x.st_mtime_ns for x in st), default=0)]
+
+
+def health(minutes):
+    guard = open(os.path.join(STATE, "health.lock"), "w")
+    try:
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("a health check is already running", flush=True)
+        return
+    stop = time.time() + minutes * 60
+    h = fm.load_json(HEALTH, {})
+    albums = h.setdefault("albums", {})
+    folders = [path for _, _, path in album_folders(CONF["flac_dest"])]
+    for path in list(albums):
+        if path not in folders:
+            albums.pop(path)
+    # never-checked folders first, then the longest ago
+    folders.sort(key=lambda p: (p in albums, albums.get(p, {}).get("checked", "")))
+    done = 0
+    for path in folders:
+        if time.time() > stop:
+            break
+        files = fm.folder_audio([path])
+        if not files:
+            continue
+        sig = folder_sig(files)
+        if albums.get(path, {}).get("sig") == sig:
+            continue
+        broken = fm.flac_damaged(files)
+        with ThreadPoolExecutor(3) as ex:
+            cuts = [e.get("cutoff") for e in ex.map(measure, [p for p in files if p.lower().endswith(".flac")])]
+        cuts = [c for c in cuts if c]
+        low = sorted(c for c in cuts if c < SUSPECT_HZ)
+        albums[path] = {"checked": now(), "sig": sig, "tracks": len(files), "damaged": len(broken),
+                        "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None}
+        done += 1
+        if done % 10 == 0:
+            fm.save_json(HEALTH, h)
+            fm.save_cache()
+    fm.save_json(HEALTH, h)
+    fm.save_cache()
+    left = sum(1 for p in folders if p not in albums)
+    log(f"health: checked {done} album folders, {left} never checked yet")
+
+
+def health_items(taken):
+    h = fm.load_json(HEALTH, {})
+    items = []
+    for path, rec in h.get("albums", {}).items():
+        bad = rec["damaged"] or (rec["of"] and rec["low"] * 2 > rec["of"])
+        if not bad or path in taken or h.get("dismissed", {}).get(path) == rec["sig"] or not os.path.isdir(path):
+            continue
+        files = fm.folder_audio([path])
+        if not files or folder_sig(files) != rec["sig"]:
+            continue                          # changed since: the next night looks again
+        iid = HEALTH_BASE + zlib.crc32(path.encode()) % 100_000_000
+        artist, title = os.path.relpath(path, CONF["flac_dest"]).split(os.sep)
+        reasons = ([f"{rec['damaged']} FLAC file(s) fail flac -t"] if rec["damaged"] else []) \
+            + ["Already in the Roon FLAC library; no MP3 is involved"]
+        main, sides = covers(iid, [path], files, [], [])
+        item = {"id": iid, "artist": artist, "title": title, "queue": "health", "status": "health",
+                "reasons": reasons, "_reasons": list(reasons), "allowed": ["bin_album", "dismiss"], "watch": False,
+                "flac": {"tracks": tracks(files, flac=True), "seconds": round(sum(fm.duration(p) or 0 for p in files), 1),
+                         "details": details(None, None, files)},
+                "mp3": None, "pairs": [], "foreign": False, "reorder": False, "health": True,
+                "cover": main, "covers": sides, "_status": "health",
+                "_do": {"kind": "health", "flac_dir": path, "mp3_dirs": [], "mp3_id": None, "hold": None,
+                        "foreign_ids": [], "sig": rec["sig"]},
+                "_files": {"flac": files, "mp3": []}}
+        items.append(suspect(item))
+    return items
+
+
+def dismiss(item):
+    """Library health only: this album is fine as it is, until its files change."""
+    h = fm.load_json(HEALTH, {})
+    h.setdefault("dismissed", {})[item["_do"]["flac_dir"]] = item["_do"]["sig"]
+    fm.save_json(HEALTH, h)
+    q = fm.load_json(QUEUE, {})
+    q["items"] = [i for i in q.get("items", []) if i["id"] != item["id"]]
+    fm.save_json(QUEUE, q)
+    log(f"looks fine: {item['artist']} — {item['title']}")
+
+
+def health_bin(item, en):
+    en.to_bin(item["_do"]["flac_dir"])
+
+
 def build_queue():
     ov = fm.load_json(OVERRIDES, {})
     one = {int(k) for k, v in ov.items() if v.get("one_album")}
@@ -727,7 +829,9 @@ def build_queue():
         if i["_do"].get("shared_ok"):
             i["_do"]["mp3_foreign_ids"] = sorted({owners[p] for p in i["_files"]["mp3"] if owners.get(p)}
                                                  - {i["_do"]["mp3_id"], None})
-    items += [i for i in (item_from_dupe(d, owners) for d in find_dupes(taken)) if i]
+    dupes = [i for i in (item_from_dupe(d, owners) for d in find_dupes(taken)) if i]
+    items += dupes
+    items += health_items(taken | {i["_do"]["flac_dir"] for i in dupes})
     for i in items:
         apply_overrides(i, ov.get(str(i["id"])))
     add_sources(items)
@@ -1288,7 +1392,7 @@ def decide(item, decision):
     if decision not in item["allowed"]:
         raise RuntimeError(f"{decision} is not available for this album")
     en = Entry(decision, item)
-    table = DUPE_DECISIONS if item["_do"].get("kind") == "dupe" else DECISIONS
+    table = {"dupe": DUPE_DECISIONS, "health": {"bin_album": health_bin}}.get(item["_do"].get("kind"), DECISIONS)
     try:
         table[decision](item, en)
     except Exception as e:
@@ -1318,6 +1422,11 @@ def resolve(album_id, decision, release=None):
             if decision != "refetch" or not 0 <= release < len(options):
                 raise SystemExit("no such release for this album")
             item["_release"] = options[release]["release"]
+        if decision == "dismiss":
+            if "dismiss" not in item["allowed"]:
+                raise SystemExit("not available for this album")
+            dismiss(item)
+            return
         if decision in ("watch_on", "watch_off"):
             if "watch" not in item["allowed"]:
                 raise SystemExit("watching is not available for this album")
@@ -1446,6 +1555,8 @@ def main():
                 and re.fullmatch(r"\d+(,\d+)*", a[2]):
             done, items = resolve_many(a[1], {int(x) for x in a[2].split(",")})
             log(f"{a[1]} for {len(done)} of {len(items)} albums")
+        elif len(a) == 2 and a[0] == "health" and a[1].isdigit():
+            health(int(a[1]))
         elif a == ["approve-ready"]:
             approve_ready()
         elif len(a) == 2 and a[0] == "undo":

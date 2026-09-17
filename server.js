@@ -28,7 +28,7 @@ const AUDIO_ROOTS = (process.env.SIFT_AUDIO_ROOTS
   || '/mnt/roon-data/music-flac,/mnt/roon-music/MP3,/mnt/roon-music/FLAC-damaged,/mnt/roon-music/FLAC').split(',');
 const FFMPEG = process.env.SIFT_FFMPEG || 'ffmpeg';
 
-const DECISIONS = new Set(['keep_flac', 'keep_mp3', 'refetch', 'watch_on', 'watch_off']);
+const DECISIONS = new Set(['keep_flac', 'keep_mp3', 'refetch', 'watch_on', 'watch_off', 'bin_album', 'dismiss']);
 const MANY = new Set(['keep_flac', 'keep_mp3', 'refetch']);
 
 // ---- helpers ---------------------------------------------------------------
