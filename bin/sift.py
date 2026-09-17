@@ -258,7 +258,8 @@ def tracks(files, flac=False, checks=True):
     for p in files:
         i = fm.file_info(p)
         t = {"name": os.path.basename(p), "title": i.get("title") or "",
-             "secs": round(i["secs"], 1) if i.get("secs") else None, "fmt": i.get("fmt") or ""}
+             "secs": round(i["secs"], 1) if i.get("secs") else None, "fmt": i.get("fmt") or "",
+             "track": i.get("track"), "disc": i.get("disc")}
         if flac and i.get("damaged"):
             t["damaged"] = True
             t["decoded_s"] = i.get("decoded_s")
@@ -895,6 +896,8 @@ def save_health(updates):
 
 def health_items(taken):
     h = fm.load_json(HEALTH, {})
+    # albums Sift or the migration moved here keep their Lidarr-FLAC id as the ledger key
+    moved = {v.get("dest"): k for k, v in fm.load_json(CONF["migrated"], {}).items() if v.get("dest")}
     items = []
     for path, rec in h.get("albums", {}).items():
         bad = rec["damaged"] or (rec["of"] and rec["low"] * 2 > rec["of"])
@@ -908,14 +911,21 @@ def health_items(taken):
         reasons = ([f"{rec['damaged']} FLAC file(s) fail flac -t"] if rec["damaged"] else []) \
             + ["Already in the Roon FLAC library; no MP3 is involved"]
         main, sides = covers(iid, [path], files, [], [])
+        key = moved.get(path)
+        if key:
+            in_flac = {"id": int(key), "monitored": False}
+        else:                                 # "Album (2023)" is filed in Lidarr as "Album"
+            in_flac = lidarr_flac_album(artist, re.sub(r"\s*\(\d{4}\)$", "", title))
         item = {"id": iid, "artist": artist, "title": title, "queue": "health", "status": "health",
-                "reasons": reasons, "_reasons": list(reasons), "allowed": ["bin_album", "dismiss"], "watch": False,
+                "reasons": reasons, "_reasons": list(reasons), "allowed": ["bin_album", "refetch", "dismiss"], "watch": False,
+                "lidarr_flac": {"monitored": in_flac["monitored"]} if in_flac else None,
                 "flac": {"tracks": tracks(files, flac=True), "seconds": round(sum(fm.duration(p) or 0 for p in files), 1),
                          "details": details(None, None, files)},
                 "mp3": None, "pairs": [], "foreign": False, "reorder": False, "health": True,
                 "cover": main, "covers": sides, "_status": "health",
                 "_do": {"kind": "health", "flac_dir": path, "mp3_dirs": [], "mp3_id": None, "hold": None,
-                        "foreign_ids": [], "sig": rec["sig"]},
+                        "foreign_ids": [], "sig": rec["sig"], "flac_album": in_flac and in_flac["id"],
+                        "migrated_key": key},
                 "_files": {"flac": files, "mp3": []}}
         items.append(suspect(item))
     return items
@@ -934,6 +944,18 @@ def dismiss(item):
 
 def health_bin(item, en):
     en.to_bin(item["_do"]["flac_dir"])
+
+
+def health_refetch(item, en):
+    """Bin a damaged or suspect library album and have Soularr look for a better one: its
+    migration record goes, so a new copy comes through the queue again, and it is monitored
+    in Lidarr-FLAC. Without a Lidarr-FLAC album this is Put in the bin."""
+    do = item["_do"]
+    en.to_bin(do["flac_dir"])
+    if do.get("migrated_key"):
+        en.ledger("migrated", do["migrated_key"], None)
+    if do.get("flac_album"):
+        en.monitor("flac", do["flac_album"], True)
 
 
 def build_queue():
@@ -1651,7 +1673,7 @@ def decide(item, decision):
     if decision not in item["allowed"]:
         raise RuntimeError(f"{decision} is not available for this album")
     en = Entry(decision, item)
-    table = {"dupe": DUPE_DECISIONS, "health": {"bin_album": health_bin}}.get(item["_do"].get("kind"), DECISIONS)
+    table = {"dupe": DUPE_DECISIONS, "health": {"bin_album": health_bin, "refetch": health_refetch}}.get(item["_do"].get("kind"), DECISIONS)
     try:
         table[decision](item, en)
     except Exception as e:

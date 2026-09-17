@@ -42,6 +42,43 @@ let selecting = false;
 const approving = new Set(); // ids in the approval job now running, followed row by row
 const unticked = new Set();   // staged decisions left out of the next approval
 const selected = new Set();
+// Icons: 24px strokes in currentColor, so they take each button's colour. Media ones are filled.
+const ICONS = {
+  check: 'M20 6 9 17l-5-5',
+  checks: 'M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16',
+  music: 'M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z',
+  refresh: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
+  trash: 'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
+  thumb: 'M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88z',
+  next: 'M5 12h14M13 5l7 7-7 7',
+  x: 'M18 6 6 18M6 6l12 12',
+  select: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11',
+  layers: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
+  wave: 'M2 12h2M6 8v8M10 4v16M14 7v10M18 10v4M22 12h0',
+  link: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71',
+  list: 'M10 6h11M10 12h11M10 18h11M4 6h1v4M4 10h2M6 18H4c0-1 2-2 2-3s-1-1.5-2-1',
+  folder: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z',
+  sort: 'M7 3v18M3 7l4-4 4 4M17 21V3M21 17l-4 4-4-4',
+  save: 'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8',
+  ban: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM4.93 4.93l14.14 14.14',
+  undo: 'M3 7v6h6M21 17a9 9 0 0 0-15-6.7L3 13',
+  up: 'M12 19V5M5 12l7-7 7 7',
+  down: 'M12 5v14M19 12l-7 7-7-7',
+  ab: 'M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4',
+  play: { fill: 'M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z' },
+  pause: { fill: 'M6 4h4v16H6zM14 4h4v16h-4z' },
+  prev: { fill: 'M6 5h2v14H6zM20 5.5v13a1 1 0 0 1-1.54.84L9 12.84a1 1 0 0 1 0-1.68l9.46-6.5A1 1 0 0 1 20 5.5z' },
+  skip: { fill: 'M16 5h2v14h-2zM4 5.5v13a1 1 0 0 0 1.54.84L15 12.84a1 1 0 0 0 0-1.68L5.54 4.66A1 1 0 0 0 4 5.5z' },
+};
+const ic = (name) => {
+  const d = ICONS[name];
+  return d.fill ? `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="${d.fill}" fill="currentColor"/></svg>`
+    : `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+};
+// the icons in the page's own HTML, named by data-icon
+document.querySelectorAll('[data-icon]').forEach((el) => el.insertAdjacentHTML('afterbegin', ic(el.dataset.icon)));
+const DECISION_ICON = { keep_flac: 'check', keep_mp3: 'music', refetch: 'refresh', bin_album: 'trash', dismiss: 'thumb' };
+
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // ---- api -------------------------------------------------------------------
@@ -224,7 +261,7 @@ function row(i) {
     return `<div class="row stagedrow"><input type="checkbox" class="approvepick" data-approve="${i.id}" ${unticked.has(i.id) ? '' : 'checked'}
       aria-label="Approve ${esc(i.artist)} — ${esc(i.title)}"><a class="rlink" href="#/album/${i.id}">${inner.replace('<span class="badges">',
         `<span class="badges"><span class="badge decision">${esc(stagedText(st))}</span>`)}</a>
-      <button class="ghost small" data-unstage="${i.id}">Remove</button></div>`;
+      <button class="ghost small" data-unstage="${i.id}">${ic('x')}Remove</button></div>`;
   }
   if (selecting) {
     return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
@@ -239,7 +276,7 @@ function renderList() {
     view.innerHTML = `<div class="listtools">
         <input type="search" id="search" placeholder="Search" autocomplete="off" aria-label="Search">
         <select id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [name]]) => `<option value="${k}">${name}</option>`).join('')}</select>
-        <button id="selecting" class="ghost">Select</button>
+        <button id="selecting" class="ghost"></button>
       </div>
       <nav class="jump" id="jump" role="tablist" aria-label="Queues"></nav><div id="queues"></div>`;
     $('search').value = search;
@@ -248,7 +285,7 @@ function renderList() {
     $('sort').onchange = () => { sortBy = $('sort').value; localStorage.setItem('sift-sort', sortBy); renderList(); };
     $('selecting').onclick = () => { selecting = !selecting; selected.clear(); renderList(); };
   }
-  $('selecting').textContent = selecting ? 'Cancel' : 'Select';
+  $('selecting').innerHTML = selecting ? `${ic('x')}Cancel` : `${ic('select')}Select`;
   const byQueue = (key) => state.items.filter((i) => queueOf(i) === key && matches(i)).sort(SORTS[sortBy][1]);
   const shown = [];
   for (const [key, name, blurb] of QUEUES) {
@@ -265,8 +302,8 @@ function renderList() {
   } else {
     const { key, name, blurb, items } = cur;
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
-      + (selecting && items.length && key !== 'staged' ? `<button class="ghost small" data-all="${key}">Select all</button>` : '')
-      + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">Stage all ${items.length}</button>` : '')
+      + (selecting && items.length && key !== 'staged' ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
+      + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${items.length}</button>` : '')
       + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
     $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
@@ -317,7 +354,7 @@ function renderApproveButton() {
   const b = $('applystaged');
   if (!b) return;
   const go = state.staged.filter((e) => !unticked.has(e.id));
-  b.textContent = `Approve ${go.length}`;
+  b.innerHTML = `${ic('checks')}Approve ${go.length}`;
   b.disabled = !go.length;
   b.onclick = async () => {
     const counts = {};
@@ -388,7 +425,7 @@ function renderSelection() {
   bar.querySelectorAll('[data-many]').forEach((b) => {
     const d = b.dataset.many;
     const n = picked.filter((i) => (i.allowed || []).includes(d)).length;
-    b.textContent = `${DECISION_TEXT[d][0]}${n && n !== picked.length ? ` (${n})` : ''}`;
+    b.innerHTML = `${ic(DECISION_ICON[d])}${DECISION_TEXT[d][0]}${n && n !== picked.length ? ` (${n})` : ''}`;
     b.disabled = !n;
     b.onclick = async () => {
       const ids = picked.filter((i) => i.allowed.includes(d)).map((i) => i.id);
@@ -428,13 +465,21 @@ function buildRows(a) {
   return rows;
 }
 
+// "3" or, on a side whose tracks span more than one disc, "2-03"; nothing without a tag
+function trackNo(tracks, t) {
+  if (t.track == null) return '';
+  const discs = new Set(tracks.map((x) => x.disc || 1));
+  const n = discs.size > 1 ? `${t.disc || 1}-${String(t.track).padStart(2, '0')}` : String(t.track);
+  return `<span class="tnum">${n}</span>`;
+}
+
 function cell(a, side, idx, rowIdx) {
   if (idx == null) return '<div class="cell empty">—</div>';
   const t = a[side].tracks[idx];
   const damaged = t.damaged
     ? `<span class="badge bad">damaged${t.decoded_s != null ? ` · decodes to ${clock(t.decoded_s)} of ${clock(t.secs)}` : ''}</span>` : '';
-  return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play">▶</button>
-    <span class="ttext"><span class="ttitle">${esc(t.title || t.name)}</span>
+  return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play">${ic('play')}</button>
+    <span class="ttext"><span class="ttitle">${trackNo(a[side].tracks, t)}${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
       ? ` · <span class="${side === 'flac' && t.cutoff < SUSPECT_HZ ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
       ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}${a.paths && a.paths[side][idx]
@@ -449,7 +494,7 @@ let pending = null;          // FLAC order being edited
 function matchCell(r, k) {
   if (r.sim == null && !r.manual) return `<div class="match ${r.m != null && r.f == null ? 'diff' : ''}">${r.m != null && r.f == null ? '≠' : ''}</div>`;
   if (r.manual) {
-    return `<div class="match same manual" title="Paired by hand">✓<button class="unpair" data-unpair="${r.m}" title="Forget this pair" aria-label="Forget this pair">×</button></div>`;
+    return `<div class="match same manual" title="Paired by hand">✓<button class="unpair" data-unpair="${r.m}" title="Forget this pair" aria-label="Forget this pair">${ic('x')}</button></div>`;
   }
   return `<div class="match ${r.same ? 'same' : 'diff'}" title="similarity ${r.sim}">${r.same ? '✓' : '≠'}</div>`;
 }
@@ -458,24 +503,24 @@ function toolbar(a) {
   const hasBoth = a.mp3 && a.flac && a.flac.tracks.length;
   if (mode === 'pair') {
     return `<div class="tools"><span class="hint">${picked == null ? 'Tap an MP3 track, then the FLAC track it matches.'
-      : 'Now tap the FLAC track that matches it.'}</span><button id="tdone" class="primary">Done</button></div>`;
+      : 'Now tap the FLAC track that matches it.'}</span><button id="tdone" class="primary">${ic('check')}Done</button></div>`;
   }
   if (mode === 'spectra') {
     return `<div class="tools"><span class="hint">Each track's spectrum, MP3 on the left, FLAC on the right. A FLAC made from an MP3 goes dark at the same height as the MP3. Tap a picture to see it full size.</span>
-      <button id="tcancel" class="primary">Done</button></div>`;
+      <button id="tcancel" class="primary">${ic('check')}Done</button></div>`;
   }
   if (mode === 'order') {
     const dirty = pending.some((v, k) => v !== k);
     return `<div class="tools"><span class="hint">Move FLAC tracks with the arrows. Saving renumbers and renames the files.</span>
-      ${a.mp3 ? '<button id="tmatch">Match MP3 order</button>' : ''}
-      <button id="tsave" class="primary" ${dirty ? '' : 'disabled'}>Save order</button><button id="tcancel" class="ghost">Done</button></div>`;
+      ${a.mp3 ? `<button id="tmatch">${ic('sort')}Match MP3 order</button>` : ''}
+      <button id="tsave" class="primary" ${dirty ? '' : 'disabled'}>${ic('save')}Save order</button><button id="tcancel" class="ghost">${ic('check')}Done</button></div>`;
   }
   const b = [];
-  if (a.flac && a.flac.tracks.length) b.push('<button id="tspectra">Spectrograms</button>');
-  if (hasBoth) b.push(`<button id="tpair" class="${a.diagnosis && a.diagnosis.suggest === 'pair' ? 'primary' : ''}">Pair tracks by hand</button>`);
-  if (a.flac && a.flac.tracks.length && a.reorder) b.push(`<button id="torder">Edit FLAC tracks</button>`);
+  if (a.flac && a.flac.tracks.length) b.push(`<button id="tspectra">${ic('wave')}Spectrograms</button>`);
+  if (hasBoth) b.push(`<button id="tpair" class="${a.diagnosis && a.diagnosis.suggest === 'pair' ? 'primary' : ''}">${ic('link')}Pair tracks by hand</button>`);
+  if (a.flac && a.flac.tracks.length && a.reorder) b.push(`<button id="torder">${ic('list')}Edit FLAC tracks</button>`);
   if (a.foreign || a.one_album) {
-    b.push(`<button id="tone">${a.one_album ? 'Undo "folder is all one album"' : 'This folder is all one album'}</button>`);
+    b.push(`<button id="tone">${ic('folder')}${a.one_album ? 'Undo "folder is all one album"' : 'This folder is all one album'}</button>`);
   }
   return b.length ? `<div class="tools">${b.join('')}</div>` : '';
 }
@@ -568,9 +613,9 @@ function orderTable(a) {
     const f = pending[k];
     const right = f == null ? '<div class="cell empty">—</div>'
       : `<div class="cell">${cell(a, 'flac', f, -1).replace(/^<div class="cell">|<\/div>$/g, '')}
-        <span class="arrows"><button data-up="${k}" ${k === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
-        <button data-down="${k}" ${k === pending.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>
-        <button data-bin="${f}" class="binbtn" aria-label="Put this track in the bin" title="Put this track in the bin">🗑</button></span></div>`;
+        <span class="arrows"><button data-up="${k}" ${k === 0 ? 'disabled' : ''} aria-label="Move up">${ic('up')}</button>
+        <button data-down="${k}" ${k === pending.length - 1 ? 'disabled' : ''} aria-label="Move down">${ic('down')}</button>
+        <button data-bin="${f}" class="binbtn" aria-label="Put this track in the bin" title="Put this track in the bin">${ic('trash')}</button></span></div>`;
     rows.push(`<div class="trow"><span class="pos">${k + 1}</span>
       ${a.mp3 && k < a.mp3.tracks.length ? cell(a, 'mp3', k, -1) : '<div class="cell empty">—</div>'}
       ${right}</div>`);
@@ -589,16 +634,20 @@ async function renderAlbum(id, keepMode = false) {
   if (mode === 'order' && (!pending || pending.length !== a.flac.tracks.length)) pending = a.flac.tracks.map((_, k) => k);
   document.title = `${a.artist} — ${a.title} · Sift`;
   const qname = (QUEUES.find((q) => q[0] === a.queue) || [])[1] || a.queue;
-  const texts = !a.dupe ? DECISION_TEXT : { ...DUPE_TEXT, refetch: ['Get a better FLAC', a.lidarr_flac
-    ? `The FLAC goes in the bin and the MP3 stays. Lidarr-FLAC has this album${a.lidarr_flac.monitored ? ', already monitored,' : ''} and Soularr will look for a FLAC; a full copy comes back through the review queue.`
-    : "The FLAC goes in the bin and the MP3 stays. Lidarr-FLAC doesn't have this album (usually because MusicBrainz doesn't), so nothing will look for a FLAC: this is the same as Keep MP3 for now."] };
+  // duplicates and library health aren't Lidarr's to begin with, so a re-fetch says whether
+  // Lidarr-FLAC has the album to search for
+  const kept = a.dupe ? ' and the MP3 stays' : '';
+  const refetchText = ['Get a better FLAC', a.lidarr_flac
+    ? `The FLAC goes in the bin${kept}. Lidarr-FLAC has this album${a.lidarr_flac.monitored ? ', already monitored,' : ''} and Soularr will look for another copy, which comes back through the review queue.`
+    : `The FLAC goes in the bin${kept}. Lidarr-FLAC doesn't have this album (usually because MusicBrainz doesn't), so nothing will look for another copy: this is the same as ${a.dupe ? 'Keep MP3' : 'Put in the bin'} for now.`];
+  const texts = a.dupe ? { ...DUPE_TEXT, refetch: refetchText } : a.health ? { ...DECISION_TEXT, refetch: refetchText } : DECISION_TEXT;
   const diag = a.diagnosis;
   // with a diagnosis, only its suggestion is highlighted, or nothing when it says listen first
   const primary = diag ? (a.allowed.includes(diag.suggest) ? diag.suggest : null) : 'keep_flac';
   const buttons = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album', 'dismiss'].filter((d) => a.allowed.includes(d))
-    .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
+    .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${ic(DECISION_ICON[d])}${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
   const near = neighbours(a);
-  if (a.allowed.length) buttons.push(`<a class="button ghost" id="later" href="${near.next ? `#/album/${near.next.id}` : '#/'}">${near.next ? 'Next album' : 'Later'}</a>`);
+  if (a.allowed.length) buttons.push(`<a class="button ghost" id="later" href="${near.next ? `#/album/${near.next.id}` : '#/'}">${ic('next')}${near.next ? 'Next album' : 'Later'}</a>`);
   const watch = a.allowed.includes('watch')
     ? `<label class="switch"><input type="checkbox" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
   const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : (a.health ? 'In the FLAC library' : 'No MP3'),
@@ -610,12 +659,12 @@ async function renderAlbum(id, keepMode = false) {
       <div><p class="qname">${esc(qname)}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
       <p class="totals">${esc(totals)}</p></div>
     </div>
-    ${stagedOf(a.id) ? `<p class="stagednote">Staged: <b>${esc(stagedText(stagedOf(a.id)))}</b>. Nothing has moved yet. <button class="ghost small" id="unstage">Remove</button></p>` : ''}
+    ${stagedOf(a.id) ? `<p class="stagednote">Staged: <b>${esc(stagedText(stagedOf(a.id)))}</b>. Nothing has moved yet. <button class="ghost small" id="unstage">${ic('x')}Remove</button></p>` : ''}
     ${diag ? `<p class="diag">${esc(diag.text)}</p>` : ''}
     <ul class="reasons">${a.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
     ${a.source ? `<p class="source">From Soulseek user <b>${esc(a.source.user)}</b>${a.source.albums > 1 ? ` · ${a.source.albums} albums from them waiting here` : ''}${a.source.bad
       ? ` · <span class="bad">${a.source.bad} suspect or damaged</span>` : ''}${a.source.blocked ? ' · blocked'
-      : ' <button id="block" class="ghost small">Block this user</button>'}</p>` : ''}
+      : ` <button id="block" class="ghost small">${ic('ban')}Block this user</button>`}</p>` : ''}
     ${mode === 'view' ? releaseFacts(a) : ''}
     <div class="decisions">${mode === 'view' ? buttons.join('') : ''}</div>
     ${mode === 'view' ? watch : ''}
@@ -639,8 +688,8 @@ async function renderAlbum(id, keepMode = false) {
         + (r.release === (a.mp3 && a.mp3.details && a.mp3.details.release) ? ' (the MP3’s release)' : '');
       const stageable = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album'].includes(b.dataset.decide);
       // staging asks only when there is a release to choose; Looks fine runs now, so it asks
-      // a duplicate's re-fetch depends on whether Lidarr-FLAC has the album, so it says which
-      const answer = stageable && !rels && !(a.dupe && b.dataset.decide === 'refetch') ? true
+      // a duplicate's or library album's re-fetch depends on whether Lidarr-FLAC has the album, so it says which
+      const answer = stageable && !rels && !((a.dupe || a.health) && b.dataset.decide === 'refetch') ? true
         : await ask({ title: `${title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
       if (!answer) return;
       const n = neighbours(a).next || neighbours(a).prev;
@@ -930,8 +979,8 @@ for (const d of decks) {
     showBuffering();
     toast("Couldn't load this track.");
   });
-  d.addEventListener('play', () => { if (d === active) $('pp').textContent = '❚❚'; });
-  d.addEventListener('pause', () => { if (d === active) $('pp').textContent = '▶'; });
+  d.addEventListener('play', () => { if (d === active) $('pp').innerHTML = ic('pause'); });
+  d.addEventListener('pause', () => { if (d === active) $('pp').innerHTML = ic('play'); });
   d.addEventListener('timeupdate', () => {
     if (d !== active) return;
     $('ptime').textContent = clock(d.currentTime);
@@ -959,16 +1008,16 @@ function renderBin() {
   const oldBytes = old.reduce((n, e) => n + e.bytes, 0);
   view.innerHTML = `<a href="#/" class="back">← All albums</a>
     <div class="qhead"><h2>Bin <span class="count">${gb(total)}</span></h2>
-    ${state.bin.length ? '<button class="danger" id="empty">Empty bin</button>' : ''}</div>
+    ${state.bin.length ? `<button class="danger" id="empty">${ic('trash')}Empty bin</button>` : ''}</div>
     <p class="blurb">Nothing here is deleted until you empty the bin. Until then every decision can be undone.</p>
     <div class="retain"><label>Keep entries for <select id="retention">${[0, 7, 14, 30, 60, 90].map((d) =>
       `<option value="${d}" ${d === days ? 'selected' : ''}>${d ? `${d} days` : 'as long as I like'}</option>`).join('')}</select></label>
-      ${old.length ? `<button class="danger small" id="emptyold">Empty ${old.length} older than ${days} days (${gb(oldBytes)})</button>`
+      ${old.length ? `<button class="danger small" id="emptyold">${ic('trash')}Empty ${old.length} older than ${days} days (${gb(oldBytes)})</button>`
     : days ? `<span class="muted">Nothing older than ${days} days.</span>` : ''}</div>
     ${state.bin.length ? state.bin.map((e) => `<div class="row binrow">
       <span class="rtext"><span class="rtitle">${esc(e.label)}</span>
       <span class="rreason">${esc(DECIDED[e.decision] || e.decision)} · ${ago(e.at)} · ${gb(e.bytes)}</span></span>
-      <button data-undo="${esc(e.id)}">Undo</button></div>`).join('') : '<p class="empty">The bin is empty.</p>'}`;
+      <button data-undo="${esc(e.id)}">${ic('undo')}Undo</button></div>`).join('') : '<p class="empty">The bin is empty.</p>'}`;
   view.querySelectorAll('[data-undo]').forEach((b) => {
     b.onclick = async () => {
       const e = state.bin.find((x) => x.id === b.dataset.undo);

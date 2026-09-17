@@ -624,6 +624,23 @@ r = sift("resolve", str(h2["id"]), "bin_album")
 check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Fake") and os.path.isdir(f"{MUSIC}/FLAC"), "Put in the bin bins the album")
 sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
 check(os.path.isfile(f"{MUSIC}/FLAC/Fake/Copy/01.flac"), "and undo brings it back")
+migrated0 = load(conf["migrated"], {})
+json.dump({**migrated0, "77": {"artist": "Fake", "title": "Copy", "dest": f"{MUSIC}/FLAC/Fake/Copy", "status": "retire"}},
+          open(conf["migrated"], "w"))
+S._flac_titles = None
+h3 = S.health_items(set())[0]
+check("refetch" in h3["allowed"] and h3["_do"]["flac_album"] == 77 and h3["lidarr_flac"] is not None,
+      "a library album the migration moved can Get a better FLAC, through its Lidarr-FLAC id")
+json.dump({"items": [h3]}, open(f"{STATE}/queue.json", "w"))
+open(API, "w").close()
+r = sift("resolve", str(h3["id"]), "refetch")
+calls = [json.loads(l) for l in open(API)]
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Fake") and "77" not in load(conf["migrated"])
+      and ["flac", "PUT", "/album/monitor", {"albumIds": [77], "monitored": True}] in calls,
+      "which bins it, forgets the migration and monitors the album again")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+check(os.path.isfile(f"{MUSIC}/FLAC/Fake/Copy/01.flac") and "77" in load(conf["migrated"]), "and undo restores both")
+json.dump(migrated0, open(conf["migrated"], "w"))
 shutil.rmtree(f"{MUSIC}/FLAC/Fake"); shutil.rmtree(f"{MUSIC}/FLAC/Well")
 
 print("empty only the old part of the bin")

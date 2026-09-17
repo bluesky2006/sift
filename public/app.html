@@ -33,23 +33,23 @@
   <main id="view"></main>
 
   <div class="player" id="player" hidden>
-    <button id="pprev" class="skip" aria-label="Previous track" title="Previous track (↑)">⏮&#xFE0E;</button>
-    <button id="pp" class="round" aria-label="Play or pause">▶</button>
-    <button id="pnext" class="skip" aria-label="Next track" title="Next track (↓)">⏭&#xFE0E;</button>
+    <button id="pprev" class="skip" aria-label="Previous track" title="Previous track (↑)" data-icon="prev"></button>
+    <button id="pp" class="round" aria-label="Play or pause" data-icon="play"></button>
+    <button id="pnext" class="skip" aria-label="Next track" title="Next track (↓)" data-icon="skip"></button>
     <div class="pinfo">
       <div class="plabel"><span class="side" id="pside"></span><span id="ptitle"></span></div>
       <div class="pbar"><span id="ptime">0:00</span><input type="range" id="seek" min="0" max="0" step="0.1" value="0"><span id="plen">0:00</span></div>
       <div class="pextra"><label class="mini"><input type="checkbox" id="match">Match volume</label><span id="pdiff"></span></div>
     </div>
-    <button id="ab" class="ab" title="Same moment in the other version">A/B</button>
-    <button id="pclose" class="ghost small" aria-label="Close player">✕</button>
+    <button id="ab" class="ab" title="Same moment in the other version" data-icon="ab">A/B</button>
+    <button id="pclose" class="ghost small" aria-label="Close player" data-icon="x"></button>
   </div>
   <div class="selbar" id="selbar" hidden>
     <span id="selcount"></span>
     <button data-many="keep_flac" class="primary">Keep FLAC</button>
     <button data-many="keep_mp3">Keep MP3</button>
     <button data-many="refetch">Get a better FLAC</button>
-    <button id="selcancel" class="ghost">Cancel</button>
+    <button id="selcancel" class="ghost" data-icon="x">Cancel</button>
   </div>
   <audio id="audio" preload="none"></audio>
   <audio id="audio2" preload="none"></audio>

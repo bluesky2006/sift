@@ -29,15 +29,15 @@ fs.mkdirSync(MEDIA, { recursive: true });
 for (const [name, codec, freq] of [['a.mp3', 'libmp3lame', 440], ['a.flac', 'flac', 660]]) {
   execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=20`, '-c:a', codec, path.join(MEDIA, name)]);
 }
-const t = (title, secs) => ({ name: `${title}.x`, title, secs, fmt: '16-bit / 44.1 kHz' });
+const t = (title, secs, track, disc) => ({ name: `${title}.x`, title, secs, fmt: '16-bit / 44.1 kHz', track, disc });
 fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
   checked: new Date().toISOString(),
   items: [
     { id: 1, artist: 'Band', title: 'Record', queue: 'different', reasons: ['1 MP3 track not matched'],
       diagnosis: { kind: 'pair', suggest: 'pair', text: "Three has no fingerprint match, but the FLAC's Two again is the same length." },
       allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, foreign: true, one_album: false, reorder: true,
-      flac: { tracks: [t('One', 100), t('Three', 300), t('Two', 200), t('Two again', 200)], seconds: 800 },
-      mp3: { tracks: [t('One', 100), t('Two', 200), t('Three', 300)], seconds: 600 },
+      flac: { tracks: [t('One', 100, 1, 1), t('Three', 300, 3, 1), t('Two', 200, 2, 1), t('Two again', 200, 1, 2)], seconds: 800 },
+      mp3: { tracks: [t('One', 100, 1), t('Two', 200, 2), t('Three', 300)], seconds: 600 },
       pairs: [{ m: 0, f: 0, sim: 0.97, same: true }, { m: 1, f: 2, sim: 0.96, same: true }, { m: 2, f: 3, sim: 0.6, same: false }],
       cover: false, _files: { flac: [], mp3: [] } },
     { id: 2, artist: 'Other', title: 'Fine', queue: 'ready', reasons: ['Every track matches'],
@@ -166,6 +166,11 @@ try {
   await page.click('a.row[href="#/album/1"]');
   await page.waitForSelector('.tracks');
   check(await page.locator('.trow').count() === 4, 'aligned rows include the unpaired FLAC track');
+  check((await page.locator('.trow').first().locator('.tnum').allTextContents()).join('|') === '1|1-01'
+    && (await page.locator('.cell:has-text("Two again") .tnum').textContent()) === '2-01',
+    'track numbers, with the disc where a side spans more than one');
+  check(await page.locator('.trow').nth(2).locator('.cell').first().locator('.tnum').count() === 0
+    && (await page.locator('.trow').nth(2).locator('.cell').first().textContent()).includes('Three'), 'and none for a track without a tag');
   check(await page.locator('#tone').isVisible(), '"folder is all one album" offered');
 
   console.log('pairing');
@@ -191,7 +196,7 @@ try {
   await page.waitForSelector('.ordering');
   await page.waitForTimeout(300);
   const flacTitles = async () => page.locator('.ordering .trow').evaluateAll((rows) =>
-    rows.map((r) => (r.querySelectorAll('.cell')[1]?.querySelector('.ttitle')?.textContent) || ''));
+    rows.map((r) => (r.querySelectorAll('.cell')[1]?.querySelector('.ttitle')?.lastChild?.textContent) || ''));   // the title, not its track number
   check((await flacTitles()).join() === 'One,Three,Two,Two again', 'order mode lists FLAC tracks as they are');
   check(await page.locator('#tsave').isDisabled(), 'save disabled until something moves');
   await page.click('#tmatch');
