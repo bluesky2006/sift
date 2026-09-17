@@ -85,13 +85,19 @@ function toast(text) {
 }
 
 // A promise-shaped <dialog>. With `password`, resolves to the password typed.
-function ask({ title, body, ok = 'OK', password = false, danger = false, error = '' }) {
+// With `choices`, resolves to { choice } holding the index picked.
+function ask({ title, body, ok = 'OK', password = false, danger = false, error = '', choices = null, chosen = 0 }) {
   const d = $('dialog');
   $('dtitle').textContent = title;
   $('dbody').textContent = body;
   $('dok').textContent = ok;
   $('dok').classList.toggle('danger', danger);
   $('dpassword').hidden = !password;
+  $('dchoose').hidden = !choices;
+  if (choices) {
+    $('dselect').innerHTML = choices.map((c, k) => `<option value="${k}">${esc(c)}</option>`).join('');
+    $('dselect').value = String(chosen);
+  }
   $('dpassword').value = '';
   $('derror').hidden = !error;
   $('derror').textContent = error;
@@ -100,7 +106,8 @@ function ask({ title, body, ok = 'OK', password = false, danger = false, error =
   if (password) $('dpassword').focus();
   return new Promise((resolve) => {
     $('dcancel').onclick = () => d.close('cancel');
-    d.onclose = () => resolve(d.returnValue === 'ok' ? (password ? $('dpassword').value : true) : null);
+    d.onclose = () => resolve(d.returnValue !== 'ok' ? null
+      : password ? $('dpassword').value : choices ? { choice: Number($('dselect').value) } : true);
   });
 }
 
@@ -506,10 +513,21 @@ async function renderAlbum(id, keepMode = false) {
   view.querySelectorAll('[data-decide]').forEach((b) => {
     b.onclick = async () => {
       const [title, body] = texts[b.dataset.decide];
-      if (await ask({ title: `${title}?`, body, ok: title })) {
+      const rels = b.dataset.decide === 'refetch' && (a.releases || []).length > 1 ? a.releases : null;
+      let chosen = 0;
+      if (rels) {
+        // the MP3's own release first, if Lidarr-FLAC knows it; else the one already selected
+        const mp3Release = a.mp3 && a.mp3.details && (a.mp3.details.release || (a.mp3.details.tags || {}).musicbrainz_albumid);
+        const k = rels.findIndex((r) => r.release === mp3Release);
+        chosen = k >= 0 ? k : Math.max(0, rels.findIndex((r) => r.selected));
+      }
+      const label = (r) => [r.date.slice(0, 4), r.title, r.format, r.country, r.label, `${r.tracks} tracks`].filter(Boolean).join(' · ')
+        + (r.release === (a.mp3 && a.mp3.details && a.mp3.details.release) ? ' (the MP3’s release)' : '');
+      const answer = await ask({ title: `${title}?`, body, ok: title, choices: rels && rels.map(label), chosen });
+      if (answer) {
         const n = neighbours(a).next || neighbours(a).prev;
         afterJob = n ? `#/album/${n.id}` : '#/';
-        run('/api/decide', { id: a.id, decision: b.dataset.decide });
+        run('/api/decide', { id: a.id, decision: b.dataset.decide, ...(rels ? { release: answer.choice } : {}) });
       }
     };
   });

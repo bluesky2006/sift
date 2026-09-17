@@ -3,6 +3,7 @@
 
     sift.py check                      classify every FLAC album, write queue.json
     sift.py resolve ID DECISION        keep_flac | keep_mp3 | refetch | watch_on | watch_off
+    sift.py resolve ID refetch N       re-fetch, looking for the album's Nth release in the list
     sift.py approve-ready              keep_flac for everything in the Ready queue
     sift.py undo ENTRY                 reverse a decision that is still in the bin
     sift.py empty-bin                  delete everything in the bin - the only delete there is
@@ -111,7 +112,10 @@ def lidarr(inst, path, method="GET", body=None):
     if os.environ.get("SIFT_FAKE_API"):            # tests: record the call, pretend it worked
         with open(os.environ["SIFT_FAKE_API"], "a") as f:
             f.write(json.dumps([inst, method, path, body]) + "\n")
-        return {"monitored": True} if method == "GET" else {}
+        if method == "GET":
+            return {"monitored": True, "releases": [{"foreignReleaseId": "rel-a", "monitored": True},
+                                                    {"foreignReleaseId": "rel-b", "monitored": False}]}
+        return {}
     req = urllib.request.Request(
         CONF[f"{inst}_api"] + path, method=method,
         headers={"X-Api-Key": api_key(inst), "Content-Type": "application/json"},
@@ -298,6 +302,30 @@ def releases(inst):
     return out
 
 
+def release_options(album_id):
+    """Lidarr-FLAC's releases for an album, for choosing which one Soularr looks for. The
+    browser picks by index into this list; the engine finds the release again by MBID."""
+    try:
+        db = sqlite3.connect(CONF["flac_db"], uri=True)
+        rows = db.execute("""select ForeignReleaseId, Title, Disambiguation, ReleaseDate, Country, Label,
+                                    Media, TrackCount, Monitored
+                             from AlbumReleases where AlbumId = ? order by ReleaseDate, Id""", (album_id,)).fetchall()
+    except Exception:
+        return []
+    out = []
+    for mbid, title, dis, date, country, label, media, count, mon in rows:
+        def listed(raw, key=None):
+            try:
+                v = json.loads(raw or "[]")
+            except ValueError:
+                return ""
+            return ", ".join(sorted({str(x.get(key) if key else x) for x in v if (x.get(key) if key else x)}))
+        out.append({"release": mbid, "title": title + (f" ({dis})" if dis else ""), "date": (date or "")[:10],
+                    "country": listed(country), "label": listed(label), "format": listed(media, "format"),
+                    "tracks": count, "selected": bool(mon)})
+    return out
+
+
 def details(inst, album_id, files):
     d = {k: v for k, v in releases(inst).get(album_id, {}).items() if not k.startswith("_")} \
         if inst and album_id else {}
@@ -359,6 +387,7 @@ def item_from_plan(e, hold):
                              and not os.path.exists(e["dest"])},
         "_files": {"flac": flac_files, "mp3": mp3_files},
     }
+    item["releases"] = release_options(e["flac_id"])
     return item if q == "arriving" else suspect(item)
 
 
@@ -782,6 +811,16 @@ class Entry:
         self.d["ops"].append({"op": "monitor", "inst": inst, "album": album_id,
                               "before": before})
 
+    def release(self, album_id, mbid):
+        """Make `mbid` the album's selected release in Lidarr-FLAC, which Soularr searches for."""
+        album = lidarr("flac", f"/album/{album_id}")
+        rels = album.get("releases", [])
+        if not any(r["foreignReleaseId"] == mbid for r in rels):
+            raise RuntimeError("Lidarr-FLAC doesn't list that release for this album")
+        before = next((r["foreignReleaseId"] for r in rels if r.get("monitored")), None)
+        set_release(album_id, mbid, album)
+        self.d["ops"].append({"op": "release", "album": album_id, "before": before})
+
     def ledger(self, which, key, value):
         """Set (or with value None, delete) one ledger entry, remembering the first
         value it had in this decision."""
@@ -798,6 +837,14 @@ class Entry:
         fm.save_json(path, data)
 
 
+def set_release(album_id, mbid, album=None):
+    album = album or lidarr("flac", f"/album/{album_id}")
+    for r in album.get("releases", []):
+        r["monitored"] = r["foreignReleaseId"] == mbid
+    album["anyReleaseOk"] = False
+    lidarr("flac", f"/album/{album_id}", "PUT", album)
+
+
 def undo_ops(ops):
     errors = []
     for o in reversed(ops):
@@ -808,6 +855,9 @@ def undo_ops(ops):
                 if o["before"] is not None:
                     lidarr(o["inst"], "/album/monitor", "PUT",
                            {"albumIds": [o["album"]], "monitored": o["before"]})
+            elif o["op"] == "release":
+                if o["before"]:
+                    set_release(o["album"], o["before"])
             elif o["op"] == "retag":
                 retag(o["dir"], [{"from": c["to"], "to": c["from"], "tag": c["tag_before"]}
                                  for c in o["changes"]])
@@ -905,6 +955,8 @@ def refetch(item, en):
         en.to_bin(do["hold"])
         en.ledger("damaged", k, None)
     en.ledger("returned", k, None)
+    if item.get("_release"):
+        en.release(item["id"], item["_release"])
     en.monitor("flac", item["id"], True)
 
 
@@ -1127,9 +1179,14 @@ def refresh_queue(done_ids=()):
         write_queue(build_queue())
 
 
-def resolve(album_id, decision):
+def resolve(album_id, decision, release=None):
     with Lock():
         item = find_item(album_id)
+        if release is not None:
+            options = item.get("releases") or []
+            if decision != "refetch" or not 0 <= release < len(options):
+                raise SystemExit("no such release for this album")
+            item["_release"] = options[release]["release"]
         if decision in ("watch_on", "watch_off"):
             if "watch" not in item["allowed"]:
                 raise SystemExit("watching is not available for this album")
@@ -1235,6 +1292,8 @@ def main():
             check()
         elif len(a) == 3 and a[0] == "resolve":
             resolve(int(a[1]), a[2])
+        elif len(a) == 4 and a[0] == "resolve" and a[3].isdigit():
+            resolve(int(a[1]), a[2], int(a[3]))
         elif len(a) == 3 and a[0] == "resolve-many" and a[1] in DECISIONS \
                 and re.fullmatch(r"\d+(,\d+)*", a[2]):
             done, items = resolve_many(a[1], {int(x) for x in a[2].split(",")})

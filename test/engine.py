@@ -147,6 +147,25 @@ check(os.path.isfile(f"{MUSIC}/MP3/Art/Alb/01.mp3"), "MP3 stays")
 calls = [json.loads(l) for l in open(API)]
 check(["flac", "PUT", "/album/monitor", {"albumIds": [1], "monitored": True}] in calls, "monitored again")
 
+print("re-fetch a chosen release")
+write_queue()
+q0 = load(f"{STATE}/queue.json")
+q0["items"][0]["releases"] = [{"release": "rel-a"}, {"release": "rel-b"}]
+json.dump(q0, open(f"{STATE}/queue.json", "w"))
+tone(f"{DATA}/music-flac/Art/Alb/01.flac", "flac") if not os.path.exists(f"{DATA}/music-flac/Art/Alb/01.flac") else None
+open(API, "w").close()
+r = sift("resolve", "1", "refetch", "1")
+calls = [json.loads(l) for l in open(API)]
+put = [c for c in calls if c[1] == "PUT" and c[2] == "/album/1"]
+check(r.returncode == 0 and put and [x["monitored"] for x in put[0][3]["releases"]] == [False, True]
+      and put[0][3]["anyReleaseOk"] is False, "the chosen release is selected in Lidarr-FLAC")
+check(sift("resolve", "1", "refetch", "5", ok=False).returncode != 0, "a release index past the list is refused")
+open(API, "w").close()
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+calls = [json.loads(l) for l in open(API)]
+check(any(c[1] == "PUT" and c[2] == "/album/1" and [x["monitored"] for x in c[3]["releases"]] == [True, False] for c in calls),
+      "undo selects the old release again")
+
 print("refusals")
 write_queue()
 r = sift("resolve", "3", "keep_flac", ok=False)

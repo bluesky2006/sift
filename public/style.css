@@ -206,3 +206,5 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 .diag { margin: 0 4px 10px; padding: 10px 12px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 10%, var(--panel));
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .sugg { font-size: 11px; opacity: .85; margin-left: 4px; text-transform: uppercase; letter-spacing: .03em; }
+.dchoose { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.dchoose select { font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; }

@@ -362,8 +362,17 @@ async function handle(req, res) {
       const needs = body.decision.startsWith('watch') ? 'watch' : body.decision;
       if (!item.allowed.includes(needs)) return json(res, 400, { error: 'not available for this album' });
       const label = `${item.artist} — ${item.title}`;
-      audit({ event: 'decide', id, decision: body.decision, label });
-      const j = startJob(body.decision, ['resolve', String(id), body.decision], label);
+      const args = ['resolve', String(id), body.decision];
+      if (body.release !== undefined) {
+        // which release to look for: an index into the list this album offers, nothing else
+        const n = (item.releases || []).length;
+        if (body.decision !== 'refetch' || !Number.isInteger(body.release) || body.release < 0 || body.release >= n) {
+          return json(res, 400, { error: 'bad release' });
+        }
+        args.push(String(body.release));
+      }
+      audit({ event: 'decide', id, decision: body.decision, release: body.release, label });
+      const j = startJob(body.decision, args, label);
       return j ? json(res, 202, { job: j.id }) : busy();
     }
     if (p === '/api/decide-many') {

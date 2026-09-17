@@ -31,7 +31,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     _do: { flac_dir: '/secret/dir' },
     _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd', path.join(MUSIC, 'Art/Alb/link.flac')], mp3: [] },
   }, {
-    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', releases: [{ release: 'x' }, { release: 'y' }], reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
     suspect: { low: 1, of: 1, hz: 16000, mp3_hz: null },
     flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
@@ -132,6 +132,15 @@ try {
   await new Promise((res) => setTimeout(res, 1500));
   const calls = fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n');
   check(calls.length === 1 && calls[0].endsWith('resolve 1 keep_flac'), 'engine ran with id and decision only');
+
+  console.log('releases');
+  await new Promise((res) => setTimeout(res, 1200));
+  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 2 }, csrf })).status === 400, 'a release past the list refused');
+  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 'rel-a' }, csrf })).status === 400, 'a release given by name refused');
+  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'keep_mp3', release: 1 }, csrf })).status === 400, 'a release only goes with a re-fetch');
+  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf })).status === 202, 'a release by index starts a job');
+  await new Promise((res) => setTimeout(res, 1500));
+  check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('resolve 2 refetch 1'), 'engine gets it as an integer');
 
   console.log('several albums');
   await new Promise((res) => setTimeout(res, 200));

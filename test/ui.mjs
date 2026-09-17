@@ -49,8 +49,10 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
     { id: 4, artist: 'Cband', title: 'Next One', queue: 'different', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+      releases: [{ release: 'r-1', title: 'Next One', date: '1999-01-01', format: 'CD', country: 'UK', label: 'L', tracks: 1, selected: true },
+        { release: 'r-2', title: 'Next One (deluxe)', date: '2010-01-01', format: 'CD', country: 'UK', label: 'L', tracks: 2, selected: false }],
       diagnosis: { kind: 'missing', suggest: 'refetch', text: 'The FLAC is missing 1 track the MP3 has: A.' },
-      flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60), t('B', 60)], seconds: 120 },
+      flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60), t('B', 60)], seconds: 120, details: { release: 'r-2', tags: {} } },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }, { m: 1, f: null, sim: null, same: false }], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
@@ -260,6 +262,14 @@ try {
   await page.click('#dok');
   await page.waitForSelector('.diag >> text=missing', { timeout: 8000 }).catch(() => {});
   check(calls().some((c) => c.endsWith('resolve 1 keep_mp3')) && page.url().endsWith('#/album/4'), 'after the decision, the next album opens');
+
+  console.log('choosing a release');
+  await page.click('[data-decide="refetch"]');
+  check(await page.locator('#dselect').isVisible() && (await page.locator('#dselect').inputValue()) === '1', "the MP3's release is preselected");
+  await page.selectOption('#dselect', '0');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('resolve 4 refetch 0')), 'the chosen release goes as an index');
 
   console.log('one album and bin view');
   await openAlbum();
