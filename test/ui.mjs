@@ -46,6 +46,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       _files: { flac: [path.join(MEDIA, 'a.flac')], mp3: [path.join(MEDIA, 'a.mp3')] } },
     { id: 3, artist: 'Faker', title: 'Transcode', queue: 'suspect', reasons: ['Possibly a converted MP3: 1 of 1 FLAC tracks stop around 16.0 kHz'],
       allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, suspect: { low: 1, of: 1, hz: 16000, mp3_hz: 16000 },
+      source: { user: 'faker99', albums: 2, bad: 2, blocked: false },
       flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
     { id: 4, artist: 'Cband', title: 'Next One', queue: 'different', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
@@ -244,6 +245,12 @@ try {
   await page.goto(BASE + '/app#/album/3');
   await page.waitForSelector('.tmeta');
   check(await page.locator('.tmeta .low').count() === 1, 'a FLAC track stopping short is marked');
+  check((await page.locator('.source').textContent()).includes('faker99') && (await page.locator('.source .bad').textContent()) === '2 suspect or damaged', 'the source user and their record show');
+  await page.click('#block');
+  check((await page.locator('#dtitle').textContent()) === 'Block faker99?', 'Block asks first');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('block-user 3')), 'and blocks by album id');
 
   console.log('diagnosis and next album');
   await page.goto(BASE + '/app#/album/1');

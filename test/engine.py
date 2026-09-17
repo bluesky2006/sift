@@ -367,6 +367,33 @@ check(r.returncode == 0 and ["mp3", "PUT", "/album/monitor", {"albumIds": [62], 
       "Keep FLAC also unmonitors the MP3 entry that held some of the folder")
 sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
 
+print("where it came from")
+import sqlite3
+tdb = f"{T}/transfers.db"
+c = sqlite3.connect(tdb)
+c.executescript("""create table Transfers (Username, Direction, Filename, State, EndedAt);
+insert into Transfers values ('baduser', 'Download', 'music\\Zed - Blue (2001) [FLAC]\\01 One.flac', 48, '2026-09-01');
+insert into Transfers values ('other', 'Download', 'share\\Zed\\Blue\\01 One.flac', 80, '2026-09-02');
+insert into Transfers values ('gooduser', 'Download', 'share\\Quill\\Green\\01.flac', 48, '2026-09-03');""")
+c.commit()
+cfg = f"{T}/soularr.ini"
+open(cfg, "w").write("[Search Settings]\nignored_users = someone\nsearch_type = x\n")
+S.CONF.update(transfers_db=f"file:{tdb}?mode=ro", soularr_config=cfg)
+src = S.add_sources([{"id": 1, "artist": "Zed", "title": "Blue", "queue": "suspect", "flac": {"tracks": []}},
+                     {"id": 2, "artist": "Quill", "title": "Green", "queue": "ready", "flac": {"tracks": []}}])
+check(src[0]["source"] == {"user": "baduser", "albums": 1, "bad": 1, "blocked": False}, "a finished download names its user, not a cancelled one")
+check(src[1]["source"]["user"] == "gooduser", "found by the artist folder above the album too")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+json.dump({**conf, "soularr_config": cfg}, open(f"{T}/conf.json", "w"))
+json.dump({"items": [{"id": 1, "artist": "Zed", "title": "Blue", "queue": "suspect", "source": src[0]["source"], "_do": {}}]},
+          open(f"{STATE}/queue.json", "w"))
+r = sift("block-user", "1")
+check(r.returncode == 0 and "ignored_users = someone,baduser\n" in open(cfg).read() and "search_type = x" in open(cfg).read(),
+      "Block adds them to Soularr's ignored users, leaving the rest")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+check("ignored_users = someone\n" in open(cfg).read(), "and undo takes them off again")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+
 print("release details")
 import sqlite3
 db = f"{T}/lidarr.db"

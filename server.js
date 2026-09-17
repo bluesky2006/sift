@@ -417,6 +417,16 @@ async function handle(req, res) {
       const j = startJob(body.tool, args, label);
       return j ? json(res, 202, { job: j.id }) : busy();
     }
+    if (p === '/api/block') {
+      // block the Soulseek user an album came from: the name comes from queue.json, never the browser
+      const id = Number(body.id);
+      const q = await readState('queue.json', { items: [] });
+      const item = Number.isInteger(id) && q.items.find((i) => i.id === id);
+      if (!item || !item.source || item.source.blocked) return json(res, 400, { error: 'no user to block for this album' });
+      audit({ event: 'block-user', id, user: item.source.user });
+      const j = startJob('block_user', ['block-user', String(id)], `Block ${item.source.user}`);
+      return j ? json(res, 202, { job: j.id }) : busy();
+    }
     if (p === '/api/approve-ready') {
       audit({ event: 'approve-ready' });
       const j = startJob('approve-ready', ['approve-ready'], 'Approve all ready albums');

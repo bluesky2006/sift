@@ -502,6 +502,9 @@ async function renderAlbum(id, keepMode = false) {
     </div>
     ${diag ? `<p class="diag">${esc(diag.text)}</p>` : ''}
     <ul class="reasons">${a.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+    ${a.source ? `<p class="source">From Soulseek user <b>${esc(a.source.user)}</b>${a.source.albums > 1 ? ` · ${a.source.albums} albums from them waiting here` : ''}${a.source.bad
+      ? ` · <span class="bad">${a.source.bad} suspect or damaged</span>` : ''}${a.source.blocked ? ' · blocked'
+      : ' <button id="block" class="ghost small">Block this user</button>'}</p>` : ''}
     ${mode === 'view' ? releaseFacts(a) : ''}
     <div class="decisions">${mode === 'view' ? buttons.join('') : ''}</div>
     ${mode === 'view' ? watch : ''}
@@ -558,7 +561,16 @@ async function renderAlbum(id, keepMode = false) {
       if (note) toast(note);
     } catch (e) { toast(e.message); }
   };
+  const tool0 = async (url, body, note) => {
+    try { await api(url, body); await watchJob(); toast(note); } catch (e) { toast(e.message); }
+  };
   const on = (idOrSel, fn) => { const el = typeof idOrSel === 'string' ? $(idOrSel) : idOrSel; if (el) el.onclick = fn; };
+  on('block', async () => {
+    if (await ask({ title: `Block ${a.source.user}?`, ok: 'Block',
+      body: "Soularr won't download from them again. This album stays as it is; decide on it separately. You can undo it from the bin." })) {
+      tool0('/api/block', { id: a.id }, `${a.source.user} is blocked.`);
+    }
+  });
   on('tspectra', () => { mode = 'spectra'; renderAlbum(a.id, true); });
   on('tpair', () => { mode = 'pair'; picked = null; renderAlbum(a.id, true); });
   on('tdone', () => { mode = 'view'; picked = null; renderAlbum(a.id, true); });
@@ -794,7 +806,7 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 // ---- the bin -----------------------------------------------------------------
 
 const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC',
-  adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered' };
+  adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked' };
 
 function renderBin() {
   document.title = 'Bin · Sift';

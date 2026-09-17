@@ -31,7 +31,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     _do: { flac_dir: '/secret/dir' },
     _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd', path.join(MUSIC, 'Art/Alb/link.flac')], mp3: [] },
   }, {
-    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', releases: [{ release: 'x' }, { release: 'y' }], reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', releases: [{ release: 'x' }, { release: 'y' }], source: { user: 'baduser', albums: 1, bad: 1, blocked: false }, reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
     suspect: { low: 1, of: 1, hz: 16000, mp3_hz: null },
     flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
@@ -141,6 +141,13 @@ try {
   check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf })).status === 202, 'a release by index starts a job');
   await new Promise((res) => setTimeout(res, 1500));
   check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('resolve 2 refetch 1'), 'engine gets it as an integer');
+
+  console.log('block a user');
+  check((await req('/api/block', { method: 'POST', body: { id: 1 }, csrf })).status === 400, 'no user to block, refused');
+  check((await req('/api/block', { method: 'POST', body: { id: 2, user: 'x' } })).status === 403, 'needs CSRF');
+  check((await req('/api/block', { method: 'POST', body: { id: 2, user: 'someone-else' }, csrf })).status === 202, 'blocks by album id');
+  await new Promise((res) => setTimeout(res, 1500));
+  check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('block-user 2'), 'the name never reaches the engine from the browser');
 
   console.log('several albums');
   await new Promise((res) => setTimeout(res, 200));

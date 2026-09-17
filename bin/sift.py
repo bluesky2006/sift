@@ -15,6 +15,7 @@
     sift.py bin-track ID F             put one FLAC track in the bin
     sift.py reorder ID 2,0,1,...       renumber and rename FLAC tracks into this order
     sift.py one-album ID on|off        the whole FLAC folder is this album
+    sift.py block-user ID              add the Soulseek user this album came from to Soularr's ignored_users
 
 The web app only ever runs the first six, with an album id or bin entry id it has checked
 against queue.json / bin.json. Every path comes from those files, never from the browser.
@@ -46,6 +47,8 @@ CONF = {
     "flac_api": fm.FLAC_API, "flac_config": "/DATA/AppData/lidarr-flac/config/config.xml",
     "mp3_api": "http://localhost:8686/api/v1", "mp3_config": "/DATA/AppData/lidarr/config/config.xml",
     "flac_db": fm.FLAC_DB, "mp3_db": fm.MP3_DB,
+    "transfers_db": "file:/DATA/AppData/slskd/data/transfers.db?mode=ro",
+    "soularr_config": "/DATA/AppData/soularr/config.ini",
     "jot_url": "http://127.0.0.1:8300/api/jot", "jot_auth": os.path.expanduser("~/scribeandjot/auth.json"),
 }
 if os.environ.get("SIFT_CONF"):                    # the test suite's sandbox
@@ -525,6 +528,93 @@ def apply_overrides(item, ov):
     return item
 
 
+# ---- where a FLAC came from ----------------------------------------------------
+# slskd records every download with the Soulseek user it came from. Lidarr renames files on
+# import, so an album is matched to the remote folder by artist and title instead.
+
+def downloads():
+    """Remote album folders downloaded in full or part: (squashed folder name, user, when)."""
+    try:
+        db = sqlite3.connect(CONF["transfers_db"], uri=True)
+        rows = db.execute("""select Username, Filename, max(EndedAt) from Transfers
+                             where Direction = 'Download' and State = 48
+                             group by Username, rtrim(Filename, replace(Filename, '\\', ''))""").fetchall()
+    except Exception:
+        return []
+    out = []
+    for user, name, ended in rows:
+        # the album folder and the one above it, which often holds the artist's name
+        parts = name.replace("\\", "/").split("/")[:-1]
+        out.append((fm.squash(" ".join(parts[-2:])), user, ended or ""))
+    return out
+
+
+def ignored_users():
+    try:
+        for line in open(CONF["soularr_config"]):
+            m = re.match(r"\s*ignored_users\s*=(.*)$", line)
+            if m:
+                return [u.strip() for u in m.group(1).split(",") if u.strip()]
+    except OSError:
+        pass
+    return []
+
+
+def add_sources(items):
+    """Name the user each album came from, and how their other albums in the queue fared."""
+    dl = downloads()
+    blocked = set(ignored_users())
+    for i in items:
+        i["source"] = None
+        if i.get("dupe") or not i.get("flac"):
+            continue
+        artist, title = fm.squash(i["artist"]), fm.squash(i["title"])
+        if not artist or not title:
+            continue
+        found = sorted((when, user) for folder, user, when in dl if title in folder and artist in folder)
+        if found:
+            i["source"] = {"user": found[-1][1]}
+    by_user = collections.defaultdict(list)
+    for i in items:
+        if i.get("source"):
+            by_user[i["source"]["user"]].append(i)
+    for user, albums in by_user.items():
+        bad = sum(1 for i in albums if i["queue"] in ("suspect", "damaged"))
+        for i in albums:
+            i["source"].update(albums=len(albums), bad=bad, blocked=user in blocked)
+    return items
+
+
+def block_user(item):
+    """Add the album's source user to Soularr's ignored_users, recorded for Undo."""
+    user = (item.get("source") or {}).get("user")
+    if not user or not re.fullmatch(r"[^,\r\n=]{1,60}", user):
+        raise RuntimeError("no Soulseek user to block for this album")
+    en = Entry("block_user", item)
+    en.d["label"] = f"Blocked {user} (from {item['artist']} — {item['title']})"
+    en.ignore_user(user)
+    save_entry(en.d)
+    log(f"blocked Soulseek user {user}")
+
+
+def set_ignored(change):
+    path = CONF["soularr_config"]
+    lines = open(path).read().split("\n")
+    for n, line in enumerate(lines):
+        m = re.match(r"(\s*ignored_users\s*=)(.*)$", line)
+        if m:
+            users = [u.strip() for u in m.group(2).split(",") if u.strip()]
+            lines[n] = m.group(1) + " " + ",".join(change(users))
+            break
+    else:
+        raise RuntimeError("Soularr's config has no ignored_users line")
+    tmp = path + ".sift-tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines))
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+
+
 # ---- library duplicates --------------------------------------------------------
 # /mnt/roon-music/FLAC predates Lidarr-FLAC and holds some albums the MP3 library also has.
 # Neither folder came through Soularr, so they're found by folder name alone.
@@ -640,6 +730,7 @@ def build_queue():
     items += [i for i in (item_from_dupe(d, owners) for d in find_dupes(taken)) if i]
     for i in items:
         apply_overrides(i, ov.get(str(i["id"])))
+    add_sources(items)
     fm.save_cache()
     return items
 
@@ -821,6 +912,12 @@ class Entry:
         set_release(album_id, mbid, album)
         self.d["ops"].append({"op": "release", "album": album_id, "before": before})
 
+    def ignore_user(self, user):
+        already = user in ignored_users()
+        if not already:
+            set_ignored(lambda users: users + [user])
+        self.d["ops"].append({"op": "ignore_user", "user": user, "added": not already})
+
     def ledger(self, which, key, value):
         """Set (or with value None, delete) one ledger entry, remembering the first
         value it had in this decision."""
@@ -855,6 +952,9 @@ def undo_ops(ops):
                 if o["before"] is not None:
                     lidarr(o["inst"], "/album/monitor", "PUT",
                            {"albumIds": [o["album"]], "monitored": o["before"]})
+            elif o["op"] == "ignore_user":
+                if o["added"]:
+                    set_ignored(lambda users: [u for u in users if u != o["user"]])
             elif o["op"] == "release":
                 if o["before"]:
                     set_release(o["album"], o["before"])
@@ -1121,6 +1221,8 @@ def track_tool(album_id, tool, args):
         elif tool == "bin-track":
             bin_track(item, int(args[0]))
             rescan("flac")
+        elif tool == "block-user":
+            block_user(item)
         elif tool == "reorder":
             reorder(item, [int(x) for x in args[0].split(",")])
             rescan("flac")
@@ -1304,7 +1406,9 @@ def main():
             undo(a[1])
         elif a == ["empty-bin"]:
             empty_bin()
-        elif len(a) >= 3 and a[0] in ("pair", "unpair", "one-album", "bin-track", "reorder"):
+        elif len(a) == 2 and a[0] == "block-user":
+            track_tool(int(a[1]), "block-user", [])
+        elif len(a) >= 3 and a[0] in ("pair", "unpair", "one-album", "bin-track", "reorder", "block-user"):
             track_tool(int(a[1]), a[0], a[2:])
         elif len(a) == 3 and a[0] == "adopt":
             adopt(a[1], a[2])
