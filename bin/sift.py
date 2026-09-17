@@ -6,7 +6,7 @@
     sift.py resolve ID refetch N       re-fetch, looking for the album's Nth release in the list
     sift.py approve-ready              keep_flac for everything in the Ready queue
     sift.py undo ENTRY                 reverse a decision that is still in the bin
-    sift.py empty-bin                  delete everything in the bin - the only delete there is
+    sift.py empty-bin [DAYS]           delete everything in the bin, or entries older than DAYS - the only delete
     sift.py resolve-many DECISION IDS  keep_flac | keep_mp3 | refetch for ids 1,2,3, one bin entry each
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
 
@@ -782,36 +782,65 @@ def jot_cookie():
     return f"mdedit_sid={payload}.{mac}"
 
 
+QUEUE_WORDS = {"ready": "ready", "suspect": "suspect", "different": "different", "lineup": "don't line up",
+               "damaged": "damaged", "look": "need a look", "dupes": "duplicates", "health": "library health"}
+
+
+def refetch_outcomes(items, told):
+    """Albums sent back to Soularr that have come back since: better, the same, or worse."""
+    h = fm.load_json(HISTORY, {})
+    decided = [e for e in fm.load_json(BIN, {"entries": []})["entries"]
+               + [x for em in h.get("emptied", []) for x in em["entries"]] if e["decision"] == "refetch"]
+    by_id = {i["id"]: i for i in items if i["queue"] != "arriving"}
+    out = []
+    for e in decided:
+        i = by_id.get(e.get("album_id"))
+        if not i or e["id"] in told or (i.get("first_seen") or "") <= e["at"]:
+            continue
+        verdict = {"ready": "better: now Ready", "suspect": "worse: suspect again",
+                   "damaged": "worse: damaged again"}.get(i["queue"], f"no better yet ({QUEUE_WORDS.get(i['queue'], i['queue'])})")
+        out.append((e["id"], f"{i['artist']} — {i['title']} came back {verdict}"))
+    return out
+
+
 def notify(items):
-    """Jot when albums have arrived that need a decision. At most once a day; albums already
-    told about are remembered, so nothing is announced twice. The first run only records
-    what is already waiting."""
+    """Jot when albums have arrived that need a decision: counts by queue, how re-fetched
+    albums came back, and how much of the bin is past the retention setting. At most once a
+    day; albums already told about are remembered, so nothing is announced twice. The first
+    run only records what is already waiting."""
     state = fm.load_json(NOTIFY, None)
     waiting = {i["id"]: i for i in items if i["queue"] != "arriving"}
     if state is None:
-        fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": None})
+        fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": None, "refetches": []})
         return
     told = set(state.get("told", []))
     new = [i for k, i in waiting.items() if k not in told]
     last = state.get("sent")
     if not new or (last and datetime.fromisoformat(last) > datetime.now() - timedelta(days=1)):
         return
-    ready = [i for i in new if i["queue"] == "ready"]
-    review = len(new) - len(ready)
-    parts = [f"{len(ready)} new album{'s' * (len(ready) != 1)} ready"] if ready else []
-    if review:
-        parts.append(f"{review} to review")
-    lines = [f"{i['artist']} — {i['title']}" + ("" if i["queue"] == "ready" else f" ({i['queue']})")
+    counts = collections.Counter(i["queue"] for i in new)
+    parts = [f"{n} {QUEUE_WORDS.get(q, q)}" for q, n in sorted(counts.items(), key=lambda x: list(QUEUE_WORDS).index(x[0])
+                                                                 if x[0] in QUEUE_WORDS else 99)]
+    outcomes = refetch_outcomes(items, set(state.get("refetches", [])))
+    lines = [f"{i['artist']} — {i['title']}" + ("" if i["queue"] == "ready" else f" ({QUEUE_WORDS.get(i['queue'], i['queue'])})")
              for i in sorted(new, key=lambda i: (i["queue"] != "ready", i["artist"].casefold()))]
-    body = "\n".join(lines[:40] + ([f"…and {len(lines) - 40} more"] if len(lines) > 40 else [])
-                     + ["", "http://100.70.110.7:8305"])
+    body = lines[:40] + ([f"…and {len(lines) - 40} more"] if len(lines) > 40 else [])
+    if outcomes:
+        body += ["", "Re-fetched:"] + [t for _, t in outcomes]
+    days = fm.load_json(SETTINGS, {}).get("retention_days")
+    if days:
+        old = older_than(fm.load_json(BIN, {"entries": []})["entries"], days)
+        if old:
+            body += ["", f"Bin: {sum(e.get('bytes', 0) for e in old) / 1e9:.1f} GB is over {days} days old."]
+    body += ["", "http://100.70.110.7:8305"]
     req = urllib.request.Request(
         CONF["jot_url"], method="POST",
-        data=json.dumps({"subject": "Sift: " + ", ".join(parts), "body": body}).encode(),
+        data=json.dumps({"subject": "Sift: " + ", ".join(parts), "body": "\n".join(body)}).encode(),
         headers={"Content-Type": "application/json", "Cookie": jot_cookie()})
     urllib.request.urlopen(req, timeout=30).read()
     # albums decided since drop out, so one that comes back (a re-fetch) is announced again
-    fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": now()})
+    fm.save_json(NOTIFY, {"told": sorted(waiting), "sent": now(),
+                          "refetches": sorted(set(state.get("refetches", [])) | {k for k, _ in outcomes})})
     log(f"jot sent: {', '.join(parts)}")
 
 
@@ -1353,26 +1382,43 @@ def undo(entry_id):
     log(f"undo {entry['decision']}: {entry['label']}")
 
 
-def empty_bin():
+SETTINGS = os.path.join(STATE, "settings.json")      # written by the web app
+
+
+def bin_roots():
+    roots = []
+    for m, root in CONF["bins"].items():
+        real = os.path.realpath(root)
+        # only ever a folder named Sift-bin directly on one of the two drives,
+        # and both are checked before anything is deleted
+        if os.path.basename(real) != "Sift-bin" or os.path.dirname(real) != m:
+            raise SystemExit(f"refusing to empty unexpected bin path {real}")
+        if os.path.isdir(real):
+            roots.append(real)
+    return roots
+
+
+def older_than(entries, days):
+    cut = datetime.now() - timedelta(days=days)
+    return [e for e in entries if datetime.fromisoformat(e["at"]) < cut]
+
+
+def empty_bin(days=None):
+    """Delete everything in the bin, or with `days` only the entries older than that."""
     with Lock():
         b = fm.load_json(BIN, {"entries": []})
-        freed = sum(e.get("bytes", 0) for e in b["entries"])
-        roots = []
-        for m, root in CONF["bins"].items():
-            real = os.path.realpath(root)
-            # only ever a folder named Sift-bin directly on one of the two drives,
-            # and both are checked before anything is deleted
-            if os.path.basename(real) != "Sift-bin" or os.path.dirname(real) != m:
-                raise SystemExit(f"refusing to empty unexpected bin path {real}")
-            if os.path.isdir(real):
-                roots.append(real)
+        gone = b["entries"] if days is None else older_than(b["entries"], days)
+        roots = bin_roots()
+        ids = {e["id"] for e in gone}
         for real in roots:
             for name in os.listdir(real):
-                shutil.rmtree(os.path.join(real, name))
-        remember("emptied", {"at": now(), "bytes": freed,
-                             "entries": [summary(e) for e in b["entries"]]})
-        fm.save_json(BIN, {"entries": []})
-    log(f"emptied bin: {len(b['entries'])} entries, {freed / 1e9:.1f} GB")
+                if days is None or name in ids:
+                    shutil.rmtree(os.path.join(real, name))
+        freed = sum(e.get("bytes", 0) for e in gone)
+        if gone:
+            remember("emptied", {"at": now(), "bytes": freed, "entries": [summary(e) for e in gone]})
+        fm.save_json(BIN, {"entries": [e for e in b["entries"] if e["id"] not in ids]})
+    log(f"emptied bin{f' (older than {days} days)' if days else ''}: {len(gone)} entries, {freed / 1e9:.1f} GB")
 
 
 def adopt(path, label):
@@ -1406,6 +1452,8 @@ def main():
             undo(a[1])
         elif a == ["empty-bin"]:
             empty_bin()
+        elif len(a) == 2 and a[0] == "empty-bin" and a[1].isdigit() and int(a[1]) > 0:
+            empty_bin(int(a[1]))
         elif len(a) == 2 and a[0] == "block-user":
             track_tool(int(a[1]), "block-user", [])
         elif len(a) >= 3 and a[0] in ("pair", "unpair", "one-album", "bin-track", "reorder", "block-user"):

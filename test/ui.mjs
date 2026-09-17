@@ -58,6 +58,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
+  { id: 'e0', at: '2026-01-01T00:00:00Z', decision: 'keep_flac', label: 'Old — One', bytes: 2e9, ops: [] },
   { id: 'e1', at: new Date().toISOString(), decision: 'reorder', label: 'Band — Record', bytes: 0, ops: [] }] }));
 
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
@@ -288,7 +289,15 @@ try {
   await page.waitForSelector('.queue');
   await page.evaluate(() => { location.hash = '#/bin'; });
   await page.waitForSelector('.binrow');
-  check((await page.locator('.binrow .rreason').textContent()).startsWith('FLAC tracks renumbered'), 'bin names a reorder');
+  check((await page.locator('.binrow .rreason').first().textContent()).startsWith('FLAC tracks renumbered'), 'bin names a reorder');
+  await page.selectOption('#retention', '30');
+  await page.waitForSelector('#emptyold');
+  check((await page.locator('#emptyold').textContent()) === 'Empty 1 older than 30 days (2.0 GB)', 'a retention setting offers to empty the old part');
+  await page.click('#emptyold');
+  await page.fill('#dpassword', 'ui-test-password-long');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('empty-bin 30')), 'with the password, only the old part is emptied');
   await page.evaluate(() => { location.hash = '#/history'; });
   await page.waitForSelector('.tiles');
   check((await page.locator('.histrow .rtitle').first().textContent()) === 'Band — Record' && await page.locator('.tile').count() === 4, 'history lists decisions with totals');

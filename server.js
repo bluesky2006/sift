@@ -303,6 +303,7 @@ async function handle(req, res) {
       bin: b.entries.map((e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 }))
         .reverse(),
       job: job && { kind: job.kind, label: job.label, done: job.done, ok: job.ok, output: job.output },
+      settings: await readState('settings.json', {}),
     });
   }
 
@@ -444,6 +445,15 @@ async function handle(req, res) {
       const j = startJob('undo', ['undo', entry.id], `Undo: ${entry.label}`);
       return j ? json(res, 202, { job: j.id }) : busy();
     }
+    if (p === '/api/settings') {
+      const days = body.retention_days;
+      if (!Number.isInteger(days) || days < 0 || days > 3650) return json(res, 400, { error: 'bad setting' });
+      const next = { ...(await readState('settings.json', {})), retention_days: days || null };
+      await fsp.writeFile(path.join(STATE, 'settings.json.tmp'), JSON.stringify(next));
+      await fsp.rename(path.join(STATE, 'settings.json.tmp'), path.join(STATE, 'settings.json'));
+      audit({ event: 'settings', retention_days: days });
+      return json(res, 200, { ok: true });
+    }
     if (p === '/api/bin/empty') {
       // the one delete in the app: CSRF plus the password again at press time
       await new Promise((r) => setTimeout(r, 500));
@@ -451,8 +461,12 @@ async function handle(req, res) {
         audit({ event: 'empty-denied', ip: req.socket.remoteAddress });
         return json(res, 401, { error: 'wrong password' });
       }
-      audit({ event: 'empty-bin' });
-      const j = startJob('empty-bin', ['empty-bin'], 'Emptying the bin');
+      const days = (await readState('settings.json', {})).retention_days;
+      if (body.older && !days) return json(res, 400, { error: 'no retention set' });
+      audit({ event: 'empty-bin', older: body.older ? days : undefined });
+      const j = body.older
+        ? startJob('empty-bin', ['empty-bin', String(days)], `Emptying bin entries older than ${days} days`)
+        : startJob('empty-bin', ['empty-bin'], 'Emptying the bin');
       return j ? json(res, 202, { job: j.id }) : busy();
     }
   }

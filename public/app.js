@@ -811,10 +811,17 @@ const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Gettin
 function renderBin() {
   document.title = 'Bin · Sift';
   const total = state.bin.reduce((n, e) => n + e.bytes, 0);
+  const days = (state.settings || {}).retention_days || 0;
+  const old = days ? state.bin.filter((e) => Date.now() - new Date(e.at).getTime() > days * 86400000) : [];
+  const oldBytes = old.reduce((n, e) => n + e.bytes, 0);
   view.innerHTML = `<a href="#/" class="back">← All albums</a>
     <div class="qhead"><h2>Bin <span class="count">${gb(total)}</span></h2>
     ${state.bin.length ? '<button class="danger" id="empty">Empty bin</button>' : ''}</div>
     <p class="blurb">Nothing here is deleted until you empty the bin. Until then every decision can be undone.</p>
+    <div class="retain"><label>Keep entries for <select id="retention">${[0, 7, 14, 30, 60, 90].map((d) =>
+      `<option value="${d}" ${d === days ? 'selected' : ''}>${d ? `${d} days` : 'as long as I like'}</option>`).join('')}</select></label>
+      ${old.length ? `<button class="danger small" id="emptyold">Empty ${old.length} older than ${days} days (${gb(oldBytes)})</button>`
+    : days ? `<span class="muted">Nothing older than ${days} days.</span>` : ''}</div>
     ${state.bin.length ? state.bin.map((e) => `<div class="row binrow">
       <span class="rtext"><span class="rtitle">${esc(e.label)}</span>
       <span class="rreason">${esc(DECIDED[e.decision] || e.decision)} · ${ago(e.at)} · ${gb(e.bytes)}</span></span>
@@ -827,21 +834,28 @@ function renderBin() {
       }
     };
   });
-  const empty = $('empty');
-  if (empty) {
-    empty.onclick = async () => {
-      let error = '';
-      for (;;) {
-        const pw = await ask({ title: `Empty the bin (${gb(total)})?`, danger: true, password: true, ok: 'Delete for good', error,
-          body: 'Everything in the bin is deleted, and none of it can be undone afterwards. Enter the password to confirm.' });
-        if (pw == null) return;
-        try { await api('/api/bin/empty', { password: pw }); watchJob(); return; } catch (e) {
-          if (e.status !== 401) { toast(e.message); return; }
-          error = 'Wrong password';
-        }
+  $('retention').onchange = async () => {
+    try {
+      await api('/api/settings', { retention_days: Number($('retention').value) });
+      await loadState();
+      renderBin();
+    } catch (e) { toast(e.message); }
+  };
+  const emptyWith = (older) => async () => {
+    let error = '';
+    for (;;) {
+      const pw = await ask({ title: older ? `Empty ${old.length} entries older than ${days} days (${gb(oldBytes)})?` : `Empty the bin (${gb(total)})?`,
+        danger: true, password: true, ok: 'Delete for good', error,
+        body: `${older ? 'Those entries are' : 'Everything in the bin is'} deleted, and none of it can be undone afterwards. Enter the password to confirm.` });
+      if (pw == null) return;
+      try { await api('/api/bin/empty', { password: pw, older }); watchJob(); return; } catch (e) {
+        if (e.status !== 401) { toast(e.message); return; }
+        error = 'Wrong password';
       }
-    };
-  }
+    }
+  };
+  if ($('empty')) $('empty').onclick = emptyWith(false);
+  if ($('emptyold')) $('emptyold').onclick = emptyWith(true);
 }
 
 // ---- history -----------------------------------------------------------------

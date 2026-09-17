@@ -210,3 +210,5 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 .dchoose select { font: inherit; padding: 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--text); width: 100%; }
 .source { margin: 0 4px 12px; font-size: 13px; color: var(--muted); }
 .source button { margin-left: 4px; }
+.retain { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 4px 12px; font-size: 14px; }
+.retain select { font: inherit; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }

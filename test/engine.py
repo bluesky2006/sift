@@ -500,7 +500,7 @@ q = lambda i, queue: {"id": i, "artist": f"A{i}", "title": "T", "queue": queue}
 S.notify([q(1, "ready"), q(2, "lineup")])
 check(not got and load(S.NOTIFY)["told"] == [1, 2], "the first check only records what is already waiting")
 S.notify([q(1, "ready"), q(2, "lineup"), q(3, "ready"), q(4, "ready"), q(5, "damaged"), q(6, "arriving")])
-check(len(got) == 1 and got[0][1]["subject"] == "Sift: 2 new albums ready, 1 to review", f"new albums are jotted ({got and got[0][1]['subject']})")
+check(len(got) == 1 and got[0][1]["subject"] == "Sift: 2 ready, 1 damaged", f"new albums are jotted ({got and got[0][1]['subject']})")
 payload, mac = got[0][0].split("=", 1)[1].split(".")
 want = _b64.urlsafe_b64encode(_hmac.new(b"abc123", payload.encode(), _hashlib.sha256).digest()).rstrip(b"=").decode()
 check(got[0][0].startswith("mdedit_sid=") and mac == want, "with a session cookie signed as JotScribe signs one")
@@ -510,8 +510,37 @@ st = load(S.NOTIFY); st["sent"] = "2000-01-01T00:00:00"; json.dump(st, open(S.NO
 S.notify([q(1, "ready"), q(2, "lineup"), q(3, "ready"), q(4, "ready"), q(5, "damaged")])
 check(len(got) == 1, "and only when something new has arrived")
 S.notify([q(1, "ready"), q(7, "ready")])
-check(len(got) == 2 and got[1][1]["subject"] == "Sift: 1 new album ready", "the next day, the next arrival is told")
+check(len(got) == 2 and got[1][1]["subject"] == "Sift: 1 ready", "the next day, the next arrival is told")
+print("digest")
+S.HISTORY, S.BIN, S.SETTINGS = f"{T}/h.json", f"{T}/b.json", f"{T}/settings.json"
+json.dump({"entries": [{"id": "rf", "at": "2026-09-01T10:00:00", "decision": "refetch", "album_id": 8, "bytes": 0},
+                       {"id": "old", "at": "2000-01-01T10:00:00", "decision": "keep_flac", "album_id": 9, "bytes": 3e9}]},
+          open(S.BIN, "w"))
+json.dump({"retention_days": 30}, open(S.SETTINGS, "w"))
+st = load(S.NOTIFY); st["sent"] = "2000-01-01T00:00:00"; json.dump(st, open(S.NOTIFY, "w"))
+back = {**q(8, "ready"), "first_seen": "2026-09-10T10:00:00"}
+S.notify([q(1, "ready"), q(7, "ready"), back])
+body = got[-1][1]["body"]
+check("A8 — T came back better: now Ready" in body, "a re-fetched album that came back is reported, with how it fared")
+check("Bin: 3.0 GB is over 30 days old." in body, "and how much of the bin is past the retention setting")
+st = load(S.NOTIFY); st["sent"] = "2000-01-01T00:00:00"; json.dump(st, open(S.NOTIFY, "w"))
+S.notify([q(1, "ready"), q(7, "ready"), back, q(10, "suspect")])
+check(got[-1][1]["subject"] == "Sift: 1 suspect" and "came back" not in got[-1][1]["body"], "a re-fetch is only reported once")
 srv.shutdown()
+
+print("empty only the old part of the bin")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+os.makedirs(f"{MUSIC}/Sift-bin/oldentry/MP3/X", exist_ok=True); open(f"{MUSIC}/Sift-bin/oldentry/MP3/X/a", "w").write("x")
+os.makedirs(f"{MUSIC}/Sift-bin/newentry/MP3/Y", exist_ok=True); open(f"{MUSIC}/Sift-bin/newentry/MP3/Y/a", "w").write("x")
+json.dump({"entries": [{"id": "oldentry", "at": "2026-01-01T00:00:00", "decision": "keep_flac", "label": "Old", "bytes": 5, "ops": []},
+                       {"id": "newentry", "at": S.now(), "decision": "keep_flac", "label": "New", "bytes": 7, "ops": []}]},
+          open(f"{STATE}/bin.json", "w"))
+r = sift("empty-bin", "30")
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/Sift-bin/oldentry") and os.path.isfile(f"{MUSIC}/Sift-bin/newentry/MP3/Y/a"),
+      "entries older than the setting go, newer ones stay")
+check([e["id"] for e in load(f"{STATE}/bin.json")["entries"]] == ["newentry"] and load(f"{STATE}/history.json")["emptied"][-1]["bytes"] == 5,
+      "and only they are recorded as emptied")
+check(sift("empty-bin", "0", ok=False).returncode != 0, "zero days is refused")
 
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")

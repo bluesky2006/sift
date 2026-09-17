@@ -176,7 +176,14 @@ try {
   check((await req('/api/undo', { method: 'POST', body: { entry: '../../etc' }, csrf })).status === 404, 'unknown bin entry refused');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'nope' }, csrf })).status === 401, 'emptying needs the password');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password' } })).status === 403, 'and a CSRF token');
-  check(!fs.readFileSync(path.join(T, 'calls'), 'utf8').includes('empty-bin'), 'no engine run from refused requests');
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true }, csrf })).status === 400, 'emptying the old part needs a retention setting');
+  check((await req('/api/settings', { method: 'POST', body: { retention_days: '30; rm' }, csrf })).status === 400, 'retention must be a whole number of days');
+  check((await req('/api/settings', { method: 'POST', body: { retention_days: 30 }, csrf })).status === 200
+    && (await (await req('/api/state')).json()).settings.retention_days === 30, 'retention is saved');
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true }, csrf })).status === 202, 'then the old part can be emptied');
+  await new Promise((res) => setTimeout(res, 1500));
+  check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('empty-bin 30'), 'with the days from the setting, not the browser');
+
 } finally {
   server.kill();
   fs.rmSync(T, { recursive: true, force: true });
