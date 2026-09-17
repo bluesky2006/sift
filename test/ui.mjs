@@ -16,7 +16,11 @@ const PORT = 18395;
 const BASE = `http://127.0.0.1:${PORT}`;
 fs.mkdirSync(STATE, { recursive: true });
 const stub = path.join(T, 'engine.sh');
-fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${T}/calls\n`, { mode: 0o755 });
+// apply-staged ($1 is the engine's path) answers as the engine does, a line per album as it starts and ends, slowly
+// enough to watch rows leave the Staged list one at a time
+fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${T}/calls\n`
+  + `if [ "$2" = apply-staged ]; then for e in $(echo "$3" | tr , ' '); do id=\${e%%:*}; echo "working [$id] x"; sleep 0.8; `
+  + `if [ "$id" = 3 ]; then echo "skipped [$id] x: no longer in the queue"; else echo "done [$id] keep: x"; fi; done; sleep 1; fi\n`, { mode: 0o755 });
 const calls = () => { try { return fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n'); } catch { return []; } };
 
 // real audio for the A/B test: a 20 s tone per version
@@ -135,6 +139,27 @@ try {
   await page.waitForTimeout(300);
   check(await page.locator('[data-tab="staged"]').count() === 0 && await page.locator('[data-tab="suspect"]').count() === 1,
     'Remove sends an album back to its queue, and the tab goes when empty');
+  await page.evaluate(async () => {
+    const { csrf } = await (await fetch('/api/csrf')).json();
+    await fetch('/api/decide-many', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF': csrf },
+      body: JSON.stringify({ decision: 'refetch', ids: [2, 3] }) });
+  });
+  await page.goto(BASE + '/app#/'); await page.reload(); await page.waitForSelector('[data-tab="staged"]');
+  await page.click('[data-tab="staged"]');
+  await page.waitForTimeout(1500);   // the first approval's bar clears
+  await page.click('#applystaged');
+  await page.click('#dok');
+  await page.waitForSelector('.stagedrow.working', { timeout: 4000 }).catch(() => {});
+  check(await page.locator('.stagedrow.working').count() === 1 && await page.locator('.stagedrow.queued').count() === 2,
+    'approving marks the rows, and the one being done spins');
+  await page.waitForFunction(() => document.querySelectorAll('.stagedrow').length === 1, null, { timeout: 5000 }).catch(() => {});
+  check(await page.locator('.stagedrow').count() === 1 && await page.locator('.jobbar #jobspin').isVisible(),
+    'a done album leaves the list while the job is still running');
+  await page.waitForSelector('.stagedrow.failed', { timeout: 5000 }).catch(() => {});
+  check((await page.locator('.stagedrow.failed .rreason').textContent().catch(() => '')) === 'Skipped: no longer in the queue',
+    'a skipped album stays, saying why');
+  await page.waitForSelector('#jobclose:visible', { timeout: 5000 }).catch(() => {});
+  await page.click('#jobclose').catch(() => {});
   await page.click('[data-tab="ready"]');
 
   await page.click('[data-tab="different"]');

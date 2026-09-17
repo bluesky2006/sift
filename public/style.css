@@ -126,6 +126,15 @@ a.row:active { transform: scale(.99); }
 .stagedrow .approvepick { width: 20px; height: 20px; flex: none; margin: 0; }
 .stagedrow .rlink { display: flex; gap: 13px; align-items: center; flex: 1; min-width: 0; color: var(--text); }
 .stagedrow button { flex: none; }
+.stagedrow { transition: height .35s ease, opacity .3s ease, transform .35s ease, margin .35s ease, padding .35s ease, border-color .2s; overflow: hidden; }
+.stagedrow.queued { opacity: .6; }
+.stagedrow.queued .approvepick, .stagedrow.queued [data-unstage] { visibility: hidden; }
+.stagedrow.working { opacity: 1; border-color: var(--accent); }
+.stagedrow.working::before { content: ""; width: 18px; height: 18px; flex: none; margin: 0 -38px 0 1px; border-radius: 50%; z-index: 1;
+  border: 2px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+.stagedrow.gone { height: 0 !important; opacity: 0; transform: translateX(24px); margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
+.stagedrow.failed { opacity: 1; border-color: var(--bad); }
+.stagedrow.failed .rreason { color: var(--bad); white-space: normal; }
 .badge.decision { color: var(--accent-text); background: var(--grad); border-color: transparent; }
 .stagednote { margin: 0 4px 12px; padding: 9px 14px; border-radius: var(--radius); font-size: 14px;
   background: color-mix(in srgb, var(--good) 10%, var(--panel)); border: 1px solid color-mix(in srgb, var(--good) 35%, var(--line)); }

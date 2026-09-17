@@ -1727,6 +1727,9 @@ def apply_staged(spec):
         for album_id, decision, release in spec:
             i = by_id.get(album_id)
             label = f"{i['artist']} — {i['title']}" if i else f"album {album_id}"
+            # one line per album as it starts and ends: the app follows these to take each
+            # album off the Staged list as it is done
+            print(f"working [{album_id}] {label}", flush=True)
             try:
                 if not i:
                     raise RuntimeError("no longer in the queue")
@@ -1737,9 +1740,9 @@ def apply_staged(spec):
                     i["_release"] = options[release]["release"]
                 decide(i, decision)
                 done.add(album_id)
-                print(f"done    {decision}: {label}", flush=True)
+                print(f"done [{album_id}] {decision}: {label}", flush=True)
             except Exception as e:
-                print(f"skipped {label}: {e}", flush=True)
+                print(f"skipped [{album_id}] {label}: {e}", flush=True)
                 remember("failed", {"at": now(), "decision": decision, "album_id": album_id,
                                     "label": label, "error": str(e)[:300]})
         rescan("flac"), rescan("mp3")

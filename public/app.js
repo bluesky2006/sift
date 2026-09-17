@@ -39,6 +39,7 @@ let search = '';
 let sortBy = localStorage.getItem('sift-sort') || 'artist';
 let tab = localStorage.getItem('sift-tab') || 'ready';
 let selecting = false;
+const approving = new Set(); // ids in the approval job now running, followed row by row
 const unticked = new Set();   // staged decisions left out of the next approval
 const selected = new Set();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -151,6 +152,7 @@ async function watchJob() {
       const { job } = await api('/api/job');
       if (!job) break;
       $('joblabel').textContent = job.label + (job.done ? (job.ok ? ' — done' : ' — failed') : '…');
+      if (job.kind === 'apply-staged') followApproval(job);
       if (job.done) {
         $('jobspin').hidden = true;
         await loadState();
@@ -175,7 +177,7 @@ async function watchJob() {
         route();
         break;
       }
-      await new Promise((r) => setTimeout(r, 1500));
+      await new Promise((r) => setTimeout(r, approving.size ? 600 : 1500));
     }
   } finally { polling = false; }
 }
@@ -324,9 +326,44 @@ function renderApproveButton() {
       + '. Each album gets its own bin entry, so each can be undone on its own.';
     const ok = await ask({ title: `Approve ${go.length} decision${go.length === 1 ? '' : 's'}?`, body, ok: 'Approve' });
     if (!ok) return;
-    go.forEach((e) => unticked.delete(e.id));
+    go.forEach((e) => { unticked.delete(e.id); approving.add(e.id); });
+    view.querySelectorAll('.stagedrow').forEach((r) => {
+      if (approving.has(Number(r.querySelector('[data-approve]').dataset.approve))) r.classList.add('queued');
+    });
+    $('applystaged').disabled = true;
     run('/api/apply-staged', { ids: go.map((e) => e.id) });
   };
+}
+
+// While an approval runs, each staged row follows the engine's per-album lines: waiting,
+// working, then gone once done; a skipped one stays, saying why, until the job ends.
+function followApproval(job) {
+  const lines = String(job.output || '').split('\n');
+  const seen = new Map();
+  for (const l of lines) {
+    const m = /^(working|done|skipped) \[(\d+)\]/.exec(l);
+    if (m) seen.set(Number(m[2]), { what: m[1], why: m[1] === 'skipped' ? l.slice(l.lastIndexOf(': ') + 2) : '' });
+  }
+  for (const r of view.querySelectorAll('.stagedrow')) {
+    const id = Number(r.querySelector('[data-approve]').dataset.approve);
+    if (!approving.has(id)) continue;
+    const s = seen.get(id);
+    r.classList.toggle('working', !!s && s.what === 'working');
+    if (s && s.what === 'done' && !r.classList.contains('gone')) {
+      r.style.height = `${r.offsetHeight}px`;
+      void r.offsetHeight;                                  // start the collapse from its real height
+      r.classList.add('gone');
+      setTimeout(() => r.remove(), 450);
+      for (const n of [view.querySelector('#q-staged .qhead .count'), view.querySelector('[data-tab="staged"] .count')]) {
+        if (n) n.textContent = String(Math.max(0, Number(n.textContent) - 1));
+      }
+    }
+    if (s && s.what === 'skipped' && !r.classList.contains('failed')) {
+      r.classList.add('failed');
+      r.querySelector('.rreason').textContent = `Skipped: ${s.why}`;
+    }
+  }
+  if (job.done) approving.clear();
 }
 
 // Staging only records a decision, so it doesn't ask first; approving does.

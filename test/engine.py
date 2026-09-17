@@ -199,7 +199,7 @@ n_before = len(load(f"{STATE}/bin.json")["entries"])
 r = sift("apply-staged", "1:keep_flac,99:keep_mp3,2:keep_mp3")
 check(r.returncode == 0, "succeeds when some go ahead")
 check(os.path.isfile(f"{MUSIC}/FLAC/Art/Alb/01.flac") and not os.path.exists(f"{MUSIC}/FLAC-damaged/Art2"), "both albums carried out")
-check("skipped album 99: no longer in the queue" in r.stdout, "an album gone from the queue is skipped and said")
+check("skipped [99] album 99: no longer in the queue" in r.stdout and "done [1] keep_flac" in r.stdout, "an album gone from the queue is skipped and said")
 entries = load(f"{STATE}/bin.json")["entries"]
 check(len(entries) == n_before + 2, "each gets its own bin entry")
 check(sift("apply-staged", "1:watch_on", ok=False).returncode != 0, "only album decisions can be staged")
