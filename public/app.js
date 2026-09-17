@@ -35,6 +35,7 @@ let csrf = null;
 let album = null;            // the album on screen, with its rows
 let search = '';
 let sortBy = localStorage.getItem('sift-sort') || 'artist';
+let tab = localStorage.getItem('sift-tab') || 'ready';
 let selecting = false;
 const selected = new Set();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -217,7 +218,7 @@ function renderList() {
         <select id="sort" aria-label="Sort">${Object.entries(SORTS).map(([k, [name]]) => `<option value="${k}">${name}</option>`).join('')}</select>
         <button id="selecting" class="ghost">Select</button>
       </div>
-      <nav class="jump" id="jump"></nav><div id="queues"></div>`;
+      <nav class="jump" id="jump" role="tablist" aria-label="Queues"></nav><div id="queues"></div>`;
     $('search').value = search;
     $('search').oninput = () => { search = $('search').value; renderList(); };
     $('sort').value = sortBy;
@@ -226,28 +227,29 @@ function renderList() {
   }
   $('selecting').textContent = selecting ? 'Cancel' : 'Select';
   const byQueue = (key) => state.items.filter((i) => i.queue === key && matches(i)).sort(SORTS[sortBy][1]);
-  const parts = [];
   const shown = [];
   for (const [key, name, blurb] of QUEUES) {
     const items = byQueue(key);
     if (!items.length && (key !== 'ready' || search)) continue;
+    shown.push({ key, name, blurb, items });
+  }
+  // one queue at a time, behind tabs; stay on the remembered one while it has albums
+  const cur = shown.find((q) => q.key === tab) || shown[0];
+  $('jump').innerHTML = shown.map(({ key, name, items }) =>
+    `<button type="button" role="tab" data-tab="${key}" aria-selected="${key === cur.key}">${esc(SHORT[key] || name)} <span class="count">${items.length}</span></button>`).join('');
+  if (!cur) {
+    $('queues').innerHTML = search ? '<p class="empty">No album matches.</p>' : '';
+  } else {
+    const { key, name, blurb, items } = cur;
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
       + (selecting && items.length ? `<button class="ghost small" data-all="${key}">Select all</button>` : '')
       + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">Approve all ${items.length}</button>` : '')
       + '</div>';
-    parts.push(`<section class="queue" id="q-${key}">${head}<p class="blurb">${blurb}</p>`
-      + (items.length ? items.map(row).join('') : '<p class="empty">Nothing waiting.</p>') + '</section>');
-    shown.push([key, name, items.length]);
+    $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
+      + (items.length ? items.map(row).join('') : '<p class="empty">Nothing waiting.</p>') + '</section>';
   }
-  if (search && !parts.length) parts.push('<p class="empty">No album matches.</p>');
-  $('jump').innerHTML = shown.map(([key, name, n]) =>
-    `<a href="#/" data-jump="${key}">${esc(SHORT[key] || name)} <span class="count">${n}</span></a>`).join('');
-  $('queues').innerHTML = parts.join('');
-  view.querySelectorAll('[data-jump]').forEach((l) => {
-    l.onclick = (ev) => {
-      ev.preventDefault();
-      $(`q-${l.dataset.jump}`).scrollIntoView({ behavior: 'smooth', block: 'start' });
-    };
+  view.querySelectorAll('[data-tab]').forEach((b) => {
+    b.onclick = () => { tab = b.dataset.tab; localStorage.setItem('sift-tab', tab); renderList(); window.scrollTo(0, 0); };
   });
   view.querySelectorAll('[data-pick]').forEach((c) => {
     c.onchange = () => { const id = Number(c.dataset.pick); if (c.checked) selected.add(id); else selected.delete(id); renderSelection(); };

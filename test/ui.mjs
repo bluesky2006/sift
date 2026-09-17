@@ -87,22 +87,26 @@ try {
   await page.waitForURL(BASE + '/app');
   await page.waitForSelector('.queue');
   check(await page.locator('#approve').textContent() === 'Approve all 1', 'Ready queue offers Approve all');
-  check((await page.locator('.qhead h2').allTextContents()).some((s) => s.startsWith('Different')), 'queues render');
-  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'section links with counts');
-  check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a suspect album shows where its FLAC stops');
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'queue tabs with counts');
+  check(await page.locator('section.queue').count() === 1 && await page.locator('#q-ready').count() === 1, 'only the Ready tab shows at first');
+  await page.click('[data-tab="suspect"]');
+  check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a tab shows its queue; a suspect album shows where its FLAC stops');
+  check(await page.locator('#q-ready').count() === 0 && await page.evaluate(() => localStorage.getItem('sift-tab')) === 'suspect', 'and the tab is remembered');
+  await page.click('[data-tab="ready"]');
 
   console.log('search, sort, select');
   await page.fill('#search', 'fine');
   await page.waitForTimeout(200);
-  check(await page.locator('a.row').count() === 1 && (await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1', 'search filters every queue');
+  check(await page.locator('a.row').count() === 1 && (await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 1', 'search filters every queue');
   await page.fill('#search', 'zzz');
   check((await page.locator('#queues').textContent()).includes('No album matches'), 'and says when nothing matches');
   await page.fill('#search', '');
   await page.selectOption('#sort', 'arrived');
   check(await page.evaluate(() => localStorage.getItem('sift-sort')) === 'arrived', 'sort is remembered');
   await page.click('#selecting');
-  check(await page.locator('input.pick').count() === 5 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
+  check(await page.locator('input.pick').count() === 1 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
   await page.click('[data-all="ready"]');
+  await page.click('[data-tab="suspect"]');
   await page.locator('input[data-pick="3"]').check();
   check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
   check((await page.locator('[data-many="keep_mp3"]').textContent()) === 'Keep MP3 (1)', 'a decision says how many albums it applies to');
@@ -112,11 +116,9 @@ try {
   await page.waitForTimeout(1500);
   check(calls().some((c) => /resolve-many refetch (2,3|3,2)$/.test(c)), 'the selection goes as one job');
   check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
-  await page.click('.jump a[data-jump="different"]');
-  await page.waitForTimeout(500);
-  check(await page.evaluate(() => Math.abs(document.getElementById('q-different').getBoundingClientRect().top) < 80
-    || window.scrollY + window.innerHeight >= document.body.scrollHeight - 2), 'a section link jumps to its section');
+  await page.click('[data-tab="ready"]');
 
+  await page.click('[data-tab="different"]');
   await page.click('a.row[href="#/album/1"]');
   await page.waitForSelector('.tracks');
   check(await page.locator('.trow').count() === 4, 'aligned rows include the unpaired FLAC track');
@@ -136,6 +138,7 @@ try {
   const openAlbum = async () => {
     await page.goto(BASE + '/app');
     await page.waitForSelector('.queue');
+    await page.click('[data-tab="different"]');
     await page.click('a.row[href="#/album/1"]');
     await page.waitForSelector('#torder');
   };
@@ -174,6 +177,7 @@ try {
   console.log('A/B');
   await page.goto(BASE + '/app');
   await page.waitForSelector('.queue');
+  await page.click('[data-tab="ready"]');
   await page.click('a.row[href="#/album/2"]');
   await page.waitForSelector('.play[data-side="mp3"]');
   await page.click('.play[data-side="mp3"]');
