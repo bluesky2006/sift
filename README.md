@@ -28,7 +28,8 @@ Nothing moves until you decide in the app. Nothing is deleted until you empty th
   `~/claude-roon/flac_migrate.py`'s `build_plan()`, the same code the migration used.
 - `~/.local/state/sift/`: `queue.json`, `bin.json`, `overrides.json`, `history.json` (what left
   the bin: emptied, undone, failed in a batch), `notify.json` (the last jot), `covers/`,
-  `spectra/`, `sift.log`, `audit.log`.
+  `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `pending/` (decisions in
+  progress), the `lock` files and the two cron logs.
 - Cron runs `sift.py check` at 25 minutes past every second hour, just after `soularr_maintenance.py`.
   If albums have arrived that weren't there at the last jot, it leaves Simon a jot in
   JotScribe, at most once a day. The first run only records what is already waiting.
@@ -84,12 +85,23 @@ files, monitoring and ledger entries. Bins are `/mnt/roon-music/Sift-bin` and
 `/mnt/roon-data/Sift-bin`, so a move into the bin stays on the same drive and is instant.
 **Empty bin** asks for the password again and is the only delete.
 
+Undo checks everything first and changes nothing if it can't finish: a file already back in
+place, a drive not mounted, or a later decision on the same album still in the bin (undo that
+one first). Each step of a decision is written to `pending/` as it starts, so one cut off by a
+restart or crash lands in the bin marked *interrupted* the next time Sift runs, and Undo puts
+the half-moved files back together.
+
 ## Safety
 
 The browser sends album ids or a bin entry id and a decision name from a fixed list, nothing
 else. The server checks the id against `queue.json`/`bin.json` and runs `sift.py` with a
 fixed argv. File paths never leave the server, and audio and spectrograms are only served
 from the four music folders (symlinks resolved first).
+
+Nothing moves unless both drives it touches are mounted: an unmounted drive's mount point is
+an ordinary folder on the root disk. Library health measures one album at a time under the
+same lock as decisions, so it never has files open that a decision is moving. Wrong passwords,
+at sign-in or when emptying the bin, share one lockout: 10 in 5 minutes.
 
 ## Shell
 

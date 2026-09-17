@@ -185,6 +185,14 @@ try {
   await new Promise((res) => setTimeout(res, 1500));
   check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('empty-bin 30'), 'with the days from the setting, not the browser');
 
+  console.log('lockout');
+  const burst = await Promise.all(Array.from({ length: 30 }, () =>
+    req('/api/auth/login', { method: 'POST', body: { password: 'wrong-password-here' } })));
+  check(burst.filter((r) => r.status === 401).length <= 10 && burst.some((r) => r.status === 429),
+    'guesses sent all at once still stop at the limit');
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'wrong-password-here' }, csrf })).status === 429,
+    'and the password re-ask for emptying shares the lockout');
+
 } finally {
   server.kill();
   fs.rmSync(T, { recursive: true, force: true });

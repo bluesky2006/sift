@@ -16,6 +16,7 @@ conf = {
     "bins": {MUSIC: f"{MUSIC}/Sift-bin", DATA: f"{DATA}/Sift-bin"},
     "migrated": f"{T}/migrated.json", "returned": f"{T}/returned.json",
     "damaged": f"{T}/damaged.json",
+    "check_mounts": False,                       # sandbox folders are not mount points
 }
 failures = 0
 
@@ -572,6 +573,90 @@ check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/Sift-bin/oldentry") and
 check([e["id"] for e in load(f"{STATE}/bin.json")["entries"]] == ["newentry"] and load(f"{STATE}/history.json")["emptied"][-1]["bytes"] == 5,
       "and only they are recorded as emptied")
 check(sift("empty-bin", "0", ok=False).returncode != 0, "zero days is refused")
+
+print("unmounted drives")
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+tone(f"{DATA}/music-flac/Mnt/Alb/01.flac", "flac")
+mnt = {**busy, "id": 20, "artist": "Mnt", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Mnt/Alb",
+       "dest": f"{MUSIC}/FLAC/Mnt/Alb", "mp3_dirs": [], "mp3_id": None, "mbid": "mb-20"}}
+json.dump({"items": [mnt]}, open(f"{STATE}/queue.json", "w"))
+json.dump({**conf, "check_mounts": True}, open(f"{T}/conf.json", "w"))    # sandbox drives are never mount points
+migrated_before = load(conf["migrated"], {})
+r = sift("resolve", "20", "keep_flac", ok=False)
+check(r.returncode != 0 and "not mounted" in r.stdout + r.stderr, "a move onto a drive that isn't mounted is refused")
+check(os.path.isfile(f"{DATA}/music-flac/Mnt/Alb/01.flac") and not os.path.exists(f"{MUSIC}/FLAC/Mnt")
+      and load(conf["migrated"], {}) == migrated_before, "and nothing moved or changed")
+json.dump({"entries": [{"id": "keepme", "at": S.now(), "decision": "keep_flac", "label": "K", "ops": []}]}, open(f"{STATE}/bin.json", "w"))
+r = sift("empty-bin", ok=False)
+check(r.returncode != 0 and len(load(f"{STATE}/bin.json")["entries"]) == 1, "emptying the bin refuses too, and forgets nothing")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+
+print("a decision cut off partway")
+# what a restart in the middle of Keep FLAC's rsync leaves: one track landed, one still in the source
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+os.makedirs(f"{MUSIC}/FLAC/Mnt/Alb", exist_ok=True)
+shutil.move(f"{DATA}/music-flac/Mnt/Alb/01.flac", f"{MUSIC}/FLAC/Mnt/Alb/01.flac")
+tone(f"{DATA}/music-flac/Mnt/Alb/02.flac", "flac")
+led = load(conf["migrated"], {}); led["20"] = {"status": "sift_keep_flac", "started": S.now()}; json.dump(led, open(conf["migrated"], "w"))
+os.makedirs(f"{STATE}/pending", exist_ok=True)
+json.dump({"id": "20260917-000000-cutoff", "at": S.now(), "decision": "keep_flac", "album_id": 20, "label": "Mnt — Alb",
+           "ops": [{"op": "ledger", "file": "migrated", "key": "20", "before": None},
+                   {"op": "move", "from": f"{DATA}/music-flac/Mnt/Alb", "to": f"{MUSIC}/FLAC/Mnt/Alb", "pending": True}]},
+          open(f"{STATE}/pending/20260917-000000-cutoff.json", "w"))
+sift("undo", "no-such-entry", ok=False)                                   # any command that takes the lock
+entries = load(f"{STATE}/bin.json")["entries"]
+check([e["id"] for e in entries] == ["20260917-000000-cutoff"] and entries[0]["interrupted"]
+      and not os.listdir(f"{STATE}/pending"), "the next command puts it in the bin, marked interrupted")
+r = sift("undo", "20260917-000000-cutoff")
+check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Mnt/Alb")) == ["01.flac", "02.flac"]
+      and not os.path.exists(f"{MUSIC}/FLAC/Mnt") and "20" not in load(conf["migrated"], {}),
+      "and undo merges both halves back and clears the ledger")
+check(not os.path.exists(f"{STATE}/pending") or not os.listdir(f"{STATE}/pending"), "a finished decision leaves no journal")
+
+print("undo in the wrong order")
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+mnt2 = {**mnt, "allowed": ["keep_mp3"], "reorder": True, "_files": {"flac": [f"{DATA}/music-flac/Mnt/Alb/01.flac",
+        f"{DATA}/music-flac/Mnt/Alb/02.flac"], "mp3": []}}
+json.dump({"items": [mnt2]}, open(f"{STATE}/queue.json", "w"))
+sift("bin-track", "20", "1")
+json.dump({"items": [mnt2]}, open(f"{STATE}/queue.json", "w"))
+sift("resolve", "20", "keep_mp3")
+first, second = load(f"{STATE}/bin.json")["entries"]
+r = sift("undo", first["id"], ok=False)
+check(r.returncode != 0 and "first" in r.stdout + r.stderr, "undoing an older decision while a newer one on the album is in the bin is refused")
+check(len(load(f"{STATE}/bin.json")["entries"]) == 2 and not os.path.exists(f"{DATA}/music-flac/Mnt"), "and nothing changed")
+check(sift("undo", second["id"]).returncode == 0 and sift("undo", first["id"]).returncode == 0
+      and sorted(os.listdir(f"{DATA}/music-flac/Mnt/Alb")) == ["01.flac", "02.flac"], "newest first, both undo cleanly")
+
+print("renames that can't finish")
+d = f"{DATA}/music-flac/Mnt/Alb"
+changes = [{"from": "01.flac", "to": "02.flac", "tag": ["2"]}, {"from": "02.flac", "to": "01.flac", "tag": ["1"]},
+           {"from": "03.flac", "to": "04.flac", "tag": ["4"]}]
+try:
+    S.retag(d, changes)
+    raised = False
+except RuntimeError:
+    raised = True
+check(raised and sorted(os.listdir(d)) == ["01.flac", "02.flac"], "a missing track is found before anything is renamed")
+real_rename, calls = os.rename, []
+def flaky(a, b):                                                         # the third rename fails
+    calls.append(a)
+    if len(calls) == 3:
+        raise OSError("disk went away")
+    real_rename(a, b)
+os.rename = flaky
+try:
+    S.retag(d, changes[:2])
+except OSError:
+    pass
+os.rename = real_rename
+check(len(calls) >= 3 and sorted(os.listdir(d)) == ["01.flac", "02.flac"], "a rename that fails partway puts the others back")
+
+print("health keeps a dismissal made while it runs")
+json.dump({"albums": {}, "dismissed": {"/x": [1, 2, 3]}}, open(S.HEALTH, "w"))
+S.save_health({"/y": {"sig": [1]}})
+hj = load(S.HEALTH)
+check(hj["dismissed"] == {"/x": [1, 2, 3]} and "/y" in hj["albums"], "results merge into health.json as it is on disk")
 
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")

@@ -66,6 +66,8 @@ HISTORY = os.path.join(STATE, "history.json")
 NOTIFY = os.path.join(STATE, "notify.json")
 # the nightly check of the whole FLAC library: results per album folder, and dismissals
 HEALTH = os.path.join(STATE, "health.json")
+# decisions in progress, one file each, until they reach bin.json
+PENDING = os.path.join(STATE, "pending")
 
 QUEUES = {"retire": "ready", "no_mp3": "ready", "unconfirmed": "different",
           "keep_mp3": "lineup", "damaged": "damaged", "manual": "look",
@@ -100,6 +102,7 @@ class Lock:
             fcntl.flock(self.f, fcntl.LOCK_EX | (0 if self.wait else fcntl.LOCK_NB))
         except BlockingIOError:
             raise SystemExit("another Sift job is running")
+        recover()
         return self
 
     def __exit__(self, *a):
@@ -736,39 +739,57 @@ def health(minutes):
         print("a health check is already running", flush=True)
         return
     stop = time.time() + minutes * 60
-    h = fm.load_json(HEALTH, {})
-    albums = h.setdefault("albums", {})
+    albums = fm.load_json(HEALTH, {}).get("albums", {})
     folders = [path for _, _, path in album_folders(CONF["flac_dest"])]
-    for path in list(albums):
-        if path not in folders:
-            albums.pop(path)
+    updates = {path: None for path in albums if path not in folders}
     # never-checked folders first, then the longest ago
     folders.sort(key=lambda p: (p in albums, albums.get(p, {}).get("checked", "")))
     done = 0
     for path in folders:
         if time.time() > stop:
             break
-        files = fm.folder_audio([path])
-        if not files:
-            continue
-        sig = folder_sig(files)
-        if albums.get(path, {}).get("sig") == sig:
-            continue
-        broken = fm.flac_damaged(files)
-        with ThreadPoolExecutor(3) as ex:
-            cuts = [e.get("cutoff") for e in ex.map(measure, [p for p in files if p.lower().endswith(".flac")])]
+        # one album at a time under the shared lock, so a decision never moves files
+        # health has open; it waits for this one album at most
+        with Lock():
+            try:
+                files = fm.folder_audio([path]) if os.path.isdir(path) else []
+                if not files:
+                    continue
+                sig = folder_sig(files)
+                if albums.get(path, {}).get("sig") == sig:
+                    continue
+                broken = fm.flac_damaged(files)
+                with ThreadPoolExecutor(3) as ex:
+                    cuts = [e.get("cutoff") for e in ex.map(measure, [p for p in files if p.lower().endswith(".flac")])]
+            except OSError as e:                  # moved or binned while we looked
+                log(f"health: skipped {path}: {e}")
+                continue
         cuts = [c for c in cuts if c]
         low = sorted(c for c in cuts if c < SUSPECT_HZ)
-        albums[path] = {"checked": now(), "sig": sig, "tracks": len(files), "damaged": len(broken),
-                        "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None}
+        updates[path] = albums[path] = {"checked": now(), "sig": sig, "tracks": len(files), "damaged": len(broken),
+                                        "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None}
         done += 1
         if done % 10 == 0:
-            fm.save_json(HEALTH, h)
-            fm.save_cache()
-    fm.save_json(HEALTH, h)
-    fm.save_cache()
+            save_health(updates)
+    save_health(updates)
     left = sum(1 for p in folders if p not in albums)
     log(f"health: checked {done} album folders, {left} never checked yet")
+
+
+def save_health(updates):
+    """Merge this run's results into health.json as it is on disk now, so a "looks fine"
+    made while health runs is kept."""
+    with Lock():
+        h = fm.load_json(HEALTH, {})
+        albums = h.setdefault("albums", {})
+        for path, rec in updates.items():
+            if rec is None:
+                albums.pop(path, None)
+            else:
+                albums[path] = rec
+        fm.save_json(HEALTH, h)
+        fm.save_cache()
+    updates.clear()
 
 
 def health_items(taken):
@@ -957,6 +978,13 @@ def mount_of(path):
     raise SystemExit(f"refusing: {path} is not on a drive with a bin")
 
 
+def require_mounted(m):
+    """An unmounted drive leaves its mount point as a plain folder on the root disk:
+    moving into it fills root, and the files hide once the drive comes back."""
+    if CONF.get("check_mounts", True) and not os.path.ismount(m):
+        raise RuntimeError(f"refusing: {m} is not mounted")
+
+
 def bin_dir(entry_id, path):
     m = mount_of(path)
     return os.path.join(CONF["bins"][m], entry_id, os.path.relpath(path, m))
@@ -978,6 +1006,8 @@ def move(src, dst):
         raise RuntimeError(f"missing: {src}")
     if os.path.exists(dst):
         raise RuntimeError(f"already exists: {dst}")
+    require_mounted(mount_of(src))
+    require_mounted(mount_of(dst))
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.isfile(src) and mount_of(src) != mount_of(dst):
         raise RuntimeError(f"single files only move within a drive: {src}")
@@ -998,6 +1028,21 @@ def move(src, dst):
                                + ", ".join(left[:3]) + ")")
         clear_fuse_hidden(src)
         subprocess.run(["find", src, "-depth", "-type", "d", "-empty", "-delete"])
+    prune(src, mount_of(src))
+
+
+def merge_back(src, dst):
+    """Undo a cross-drive move that was cut off: some files landed in `src`, the rest are
+    still in `dst`. rsync only removes a source file once it has landed whole."""
+    require_mounted(mount_of(src))
+    require_mounted(mount_of(dst))
+    r = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
+                        "--exclude", ".fuse_hidden*", src + "/", dst + "/"], capture_output=True, text=True)
+    left = leftovers(src)
+    if r.returncode or left:
+        raise RuntimeError(f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left)")
+    clear_fuse_hidden(src)
+    subprocess.run(["find", src, "-depth", "-type", "d", "-empty", "-delete"])
     prune(src, mount_of(src))
 
 
@@ -1022,9 +1067,24 @@ class Entry:
                   "at": now(), "decision": decision, "album_id": item["id"],
                   "label": f"{item['artist']} — {item['title']}", "ops": []}
 
+    def journal(self):
+        """Written as each step starts, so a decision killed partway (a service restart,
+        a crash) still reaches the bin and can be undone. See recover()."""
+        os.makedirs(PENDING, exist_ok=True)
+        fm.save_json(os.path.join(PENDING, self.d["id"] + ".json"), self.d)
+
     def move(self, src, dst):
-        move(src, dst)
-        self.d["ops"].append({"op": "move", "from": src, "to": dst})
+        op = {"op": "move", "from": src, "to": dst, "pending": True}
+        self.d["ops"].append(op)
+        self.journal()
+        try:
+            move(src, dst)
+        except Exception:
+            self.d["ops"].remove(op)              # move() has put everything back itself
+            self.journal()
+            raise
+        del op["pending"]
+        self.journal()
 
     def to_bin(self, src):
         self.move(src, bin_dir(self.d["id"], src))
@@ -1034,6 +1094,7 @@ class Entry:
         lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
         self.d["ops"].append({"op": "monitor", "inst": inst, "album": album_id,
                               "before": before})
+        self.journal()
 
     def release(self, album_id, mbid):
         """Make `mbid` the album's selected release in Lidarr-FLAC, which Soularr searches for."""
@@ -1044,12 +1105,14 @@ class Entry:
         before = next((r["foreignReleaseId"] for r in rels if r.get("monitored")), None)
         set_release(album_id, mbid, album)
         self.d["ops"].append({"op": "release", "album": album_id, "before": before})
+        self.journal()
 
     def ignore_user(self, user):
         already = user in ignored_users()
         if not already:
             set_ignored(lambda users: users + [user])
         self.d["ops"].append({"op": "ignore_user", "user": user, "added": not already})
+        self.journal()
 
     def ledger(self, which, key, value):
         """Set (or with value None, delete) one ledger entry, remembering the first
@@ -1060,6 +1123,7 @@ class Entry:
                    for o in self.d["ops"]):
             self.d["ops"].append({"op": "ledger", "file": which, "key": key,
                                   "before": data.get(key)})
+            self.journal()
         if value is None:
             data.pop(key, None)
         else:
@@ -1080,7 +1144,11 @@ def undo_ops(ops):
     for o in reversed(ops):
         try:
             if o["op"] == "move":
-                move(o["to"], o["from"])
+                if not o.get("pending") or not os.path.exists(o["from"]):
+                    move(o["to"], o["from"])
+                elif os.path.exists(o["to"]):
+                    merge_back(o["to"], o["from"])
+                # pending with nothing at "to": the move never started
             elif o["op"] == "monitor":
                 if o["before"] is not None:
                     lidarr(o["inst"], "/album/monitor", "PUT",
@@ -1121,6 +1189,65 @@ def save_entry(entry):
     entry["bytes"] = entry_bytes(entry)
     b["entries"].append(entry)
     fm.save_json(BIN, b)
+    drop_journal(entry)
+
+
+def drop_journal(entry):
+    try:
+        os.remove(os.path.join(PENDING, entry["id"] + ".json"))
+    except FileNotFoundError:
+        pass
+
+
+def recover():
+    """Decisions that were cut off go in the bin as they stand, marked interrupted, so
+    Undo can put their files and ledgers back. Runs whenever the lock is taken."""
+    try:
+        names = [n for n in os.listdir(PENDING) if n.endswith(".json")]
+    except FileNotFoundError:
+        return
+    for name in names:
+        entry = fm.load_json(os.path.join(PENDING, name), None)
+        if not entry:
+            continue
+        entry["interrupted"] = True
+        entry["label"] += " (interrupted: undo to put it back)"
+        save_entry(entry)
+        log(f"INTERRUPTED {entry['decision']}: {entry['label']} is in the bin")
+
+
+def undo_problems(entry, entries):
+    """Everything that would stop this undo, found before anything changes."""
+    # a block on a Soulseek user changes nothing an album decision touches
+    touches = lambda e: any(o["op"] != "ignore_user" for o in e["ops"])
+    after = entries[entries.index(entry) + 1:]           # bin.json is in the order decisions were made
+    later = [e for e in after if entry.get("album_id") is not None and touches(entry) and touches(e)
+             and e.get("album_id") == entry["album_id"]]
+    if later:
+        return [f"undo the later {later[-1]['decision']} on this album ({later[-1]['label']}) first"]
+    problems = []
+    for o in entry["ops"]:
+        if o["op"] == "move":
+            try:
+                require_mounted(mount_of(o["from"]))
+                require_mounted(mount_of(o["to"]))
+            except (RuntimeError, SystemExit) as e:
+                problems.append(str(e))
+                continue
+            if o.get("pending") and os.path.exists(o["from"]):
+                continue                          # merged back, or never started
+            if not os.path.exists(o["to"]):
+                problems.append(f"missing: {o['to']}")
+            elif os.path.exists(o["from"]):
+                problems.append(f"already exists: {o['from']}")
+        elif o["op"] == "retag":
+            tos = {c["to"] for c in o["changes"]}
+            for c in o["changes"]:
+                if not os.path.isfile(os.path.join(o["dir"], c["to"])):
+                    problems.append(f"missing: {os.path.join(o['dir'], c['to'])}")
+                elif c["from"] not in tos and os.path.exists(os.path.join(o["dir"], c["from"])):
+                    problems.append(f"already exists: {os.path.join(o['dir'], c['from'])}")
+    return problems
 
 
 # ---- decisions -----------------------------------------------------------------
@@ -1297,12 +1424,27 @@ def renamed(name, number):
 
 def retag(folder, changes):
     """Rename and renumber files in one folder. Two passes through temporary names, so
-    swapping 04 and 06 never collides."""
-    for n, c in enumerate(changes):
-        os.rename(os.path.join(folder, c["from"]), os.path.join(folder, f".sift-tmp-{n}"))
-    for n, c in enumerate(changes):
+    swapping 04 and 06 never collides. Every name is checked first, and a rename that fails
+    puts back the ones before it, so no track is left under a temporary name."""
+    froms = {c["from"] for c in changes}
+    for c in changes:
+        if not os.path.isfile(os.path.join(folder, c["from"])):
+            raise RuntimeError(f"missing: {c['from']}")
+        if c["to"] not in froms and os.path.exists(os.path.join(folder, c["to"])):
+            raise RuntimeError(f"already exists: {c['to']}")
+    renames = [(c["from"], f".sift-tmp-{n}") for n, c in enumerate(changes)] \
+        + [(f".sift-tmp-{n}", c["to"]) for n, c in enumerate(changes)]
+    done = []
+    try:
+        for a, b in renames:
+            os.rename(os.path.join(folder, a), os.path.join(folder, b))
+            done.append((a, b))
+    except OSError:
+        for a, b in reversed(done):
+            os.rename(os.path.join(folder, b), os.path.join(folder, a))
+        raise
+    for c in changes:
         path = os.path.join(folder, c["to"])
-        os.rename(os.path.join(folder, f".sift-tmp-{n}"), path)
         m = mutagen.File(path, easy=True)
         if c["tag"] is None:
             if "tracknumber" in m:
@@ -1333,8 +1475,13 @@ def reorder(item, order):
     if finals & others:
         raise RuntimeError("a new filename is already taken in the folder")
     en = Entry("reorder", item)
-    retag(folder, changes)
     en.d["ops"].append({"op": "retag", "dir": folder, "album": item["id"], "changes": changes})
+    en.journal()
+    try:
+        retag(folder, changes)
+    except Exception:
+        drop_journal(en.d)
+        raise
     rename_in_overrides(item["id"], {c["from"]: c["to"] for c in changes})
     save_entry(en.d)
     log(f"reordered: {item['artist']} — {item['title']}")
@@ -1397,6 +1544,7 @@ def decide(item, decision):
         table[decision](item, en)
     except Exception as e:
         errors = undo_ops(en.d["ops"])
+        drop_journal(en.d)
         log(f"FAILED {decision} {en.d['label']}: {e}"
             + (f" - rollback problems: {errors}" if errors else " - rolled back"))
         raise
@@ -1479,6 +1627,9 @@ def undo(entry_id):
         entry = next((e for e in b["entries"] if e["id"] == entry_id), None)
         if not entry:
             raise SystemExit("no such bin entry")
+        problems = undo_problems(entry, b["entries"])
+        if problems:
+            raise SystemExit("can't undo, nothing changed: " + "; ".join(problems[:3]))
         errors = undo_ops(entry["ops"])
         if errors:
             log(f"undo {entry['label']} incomplete: {errors}")
@@ -1502,6 +1653,7 @@ def bin_roots():
         # and both are checked before anything is deleted
         if os.path.basename(real) != "Sift-bin" or os.path.dirname(real) != m:
             raise SystemExit(f"refusing to empty unexpected bin path {real}")
+        require_mounted(m)
         if os.path.isdir(real):
             roots.append(real)
     return roots
