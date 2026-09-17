@@ -265,9 +265,11 @@ dialog form { display: grid; gap: 12px; }
 dialog p { margin: 0; color: var(--muted); }
 .dbuttons { display: flex; justify-content: flex-end; gap: 8px; }
 .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(92px + env(safe-area-inset-bottom));
-  background: color-mix(in srgb, var(--text) 92%, transparent); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-size: 14px;
-  font-weight: 500; box-shadow: var(--shadow-lift); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-  max-width: calc(100% - 32px); z-index: 10; animation: toast .25s ease both; }
+  width: max-content; max-width: min(420px, calc(100% - 32px)); padding: 11px 16px; border-radius: 14px; font-size: 14px;
+  font-weight: 500; line-height: 1.35; text-align: left; text-wrap: balance; color: var(--text);
+  background: color-mix(in srgb, var(--panel) 88%, transparent); border: 1px solid var(--line);
+  box-shadow: var(--shadow-lift); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  z-index: 10; animation: toast .25s ease both; }
 @keyframes toast { from { opacity: 0; transform: translate(-50%, 8px); } }
 
 @media (max-width: 560px) {
