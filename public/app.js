@@ -195,8 +195,8 @@ const matches = (i) => !search || fold(`${i.artist} ${i.title}`).includes(fold(s
 function row(i) {
   const badges = [];
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
-  if (i.flac) badges.push(`<span class="badge">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
-  if (i.mp3) badges.push(`<span class="badge">MP3 ${esc(i.mp3.fmt)} · ${i.mp3.n}</span>`);
+  if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
+  if (i.mp3) badges.push(`<span class="badge mp3">MP3 ${esc(i.mp3.fmt)} · ${i.mp3.n}</span>`);
   if (i.flac && i.flac.damaged) badges.push(`<span class="badge bad">${i.flac.damaged} damaged</span>`);
   if (i.suspect) badges.push(`<span class="badge bad">FLAC stops at ${khz(i.suspect.hz)}</span>`);
   const inner = `${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
