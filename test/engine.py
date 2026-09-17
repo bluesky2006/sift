@@ -193,6 +193,21 @@ calls = [json.loads(l) for l in open(API)]
 check(r.returncode == 0 and ["flac", "PUT", "/album/monitor", {"albumIds": [2], "monitored": False}] in calls, "watch off unmonitors")
 check(load(conf["damaged"])["2"]["watch"] is False, "and is remembered")
 
+print("approving staged decisions")
+write_queue()
+n_before = len(load(f"{STATE}/bin.json")["entries"])
+r = sift("apply-staged", "1:keep_flac,99:keep_mp3,2:keep_mp3")
+check(r.returncode == 0, "succeeds when some go ahead")
+check(os.path.isfile(f"{MUSIC}/FLAC/Art/Alb/01.flac") and not os.path.exists(f"{MUSIC}/FLAC-damaged/Art2"), "both albums carried out")
+check("skipped album 99: no longer in the queue" in r.stdout, "an album gone from the queue is skipped and said")
+entries = load(f"{STATE}/bin.json")["entries"]
+check(len(entries) == n_before + 2, "each gets its own bin entry")
+check(sift("apply-staged", "1:watch_on", ok=False).returncode != 0, "only album decisions can be staged")
+check(sift("apply-staged", "1:keep_flac;ls", ok=False).returncode != 0, "a malformed list is refused")
+for e in reversed(entries[n_before:]):
+    sift("undo", e["id"])
+check(os.path.isfile(f"{DATA}/music-flac/Art/Alb/01.flac") and os.path.isdir(f"{MUSIC}/FLAC-damaged/Art2"), "and each undoes on its own")
+
 print("empty bin")
 r = sift("empty-bin")
 check(r.returncode == 0, "succeeds")
@@ -446,11 +461,27 @@ check(len(found) == 1 and found[0]["mp3_dirs"] == [f"{MUSIC}/MP3/The Dupe Band/T
 check(not any(f["artist"] == "Solo" for f in S.find_dupes(set())), "an album only in FLAC is not")
 check(not any(f["artist"] == "Dupe Band" for f in S.find_dupes({f"{MUSIC}/FLAC/Dupe Band/Twice"})),
       "a folder the review queue already covers is left to it")
-dupe = S.item_from_dupe(found[0], {f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3": 31,
-                                   f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/02.mp3": 31})
-check(dupe["queue"] == "dupes" and dupe["id"] >= S.DUPE_BASE and set(dupe["allowed"]) == {"keep_flac", "keep_mp3"},
+# the two Lidarrs, as far as duplicates read them
+import sqlite3
+for name, sql in (("mp3", "create table Albums (Id, Title); insert into Albums values (31, 'Twice'), (32, 'Something Else');"),
+                  ("flac", """create table Albums (Id, Title, ArtistMetadataId, Monitored); create table ArtistMetadata (Id, Name);
+                              insert into ArtistMetadata values (1, 'Dupe Band'); insert into Albums values (4400, 'Twice', 1, 0);""")):
+    c = sqlite3.connect(f"{T}/dupe-{name}.db"); c.executescript(sql); c.commit(); c.close()
+    S.CONF[f"{name}_db"] = f"file:{T}/dupe-{name}.db?mode=ro"
+S._mp3_titles = S._flac_titles = None
+mp3s = [f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3", f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/02.mp3"]
+dupe = S.item_from_dupe(found[0], {p: 31 for p in mp3s})
+check(dupe["queue"] == "dupes" and dupe["id"] >= S.DUPE_BASE and set(dupe["allowed"]) == {"keep_flac", "keep_mp3", "refetch"},
       "it becomes a Library duplicates item")
 check(dupe["_do"]["mp3_id"] == 31 and len(dupe["pairs"]) == 2, "with the MP3 Lidarr album and track pairs")
+check(dupe["_do"]["flac_album"] == 4400 and dupe["lidarr_flac"] == {"monitored": False}, "and the Lidarr-FLAC album of the same name")
+check(S.item_from_dupe(found[0], {p: 32 for p in mp3s})["_do"]["mp3_id"] is None,
+      "an MP3 Lidarr album of another name is not taken for it")
+S._flac_titles = None
+S.CONF["flac_db"] = f"file:{T}/missing.db?mode=ro"
+lonely = S.item_from_dupe(found[0], {})
+check(lonely["_do"]["flac_album"] is None and lonely["lidarr_flac"] is None and "refetch" in lonely["allowed"],
+      "without a Lidarr-FLAC album, Get a better FLAC is still offered")
 json.dump({"items": [dupe]}, open(f"{STATE}/queue.json", "w"))
 before_dupe = snapshot()
 open(API, "w").close()
@@ -470,6 +501,23 @@ check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Dupe Band")
 check(os.path.isdir(f"{MUSIC}/FLAC"), "the FLAC library root stays")
 sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
 check(snapshot() == before_dupe, "and undo restores it")
+json.dump({"items": [dupe]}, open(f"{STATE}/queue.json", "w"))
+open(API, "w").close()
+r = sift("resolve", str(dupe["id"]), "refetch")
+calls = [json.loads(l) for l in open(API)]
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Dupe Band")
+      and os.path.isfile(f"{MUSIC}/MP3/The Dupe Band/Twice (1999)/01.mp3"), "Get a better FLAC bins the FLAC and keeps the MP3")
+check(["flac", "PUT", "/album/monitor", {"albumIds": [4400], "monitored": True}] in calls, "and monitors the album in Lidarr-FLAC")
+open(API, "w").close()
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+calls = [json.loads(l) for l in open(API)]
+check(snapshot() == before_dupe and any(c[0] == "flac" and c[2] == "/album/monitor" for c in calls), "undo restores the FLAC and the monitoring")
+json.dump({"items": [lonely]}, open(f"{STATE}/queue.json", "w"))
+open(API, "w").close()
+r = sift("resolve", str(lonely["id"]), "refetch")
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Dupe Band")
+      and not any("/album" in c for c in open(API)), "without a Lidarr-FLAC album it only bins the FLAC")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
 
 print("several albums at once")
 json.dump(conf, open(f"{T}/conf.json", "w"))

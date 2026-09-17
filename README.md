@@ -18,7 +18,7 @@ the MP3 you already have and sorted into a queue:
 | Library duplicates | An album in both `/mnt/roon-music/FLAC` and `/mnt/roon-music/MP3`, matched by folder name |
 | Arriving | Imported in the last 3 hours; checked next time |
 
-Nothing moves until you decide in the app. Nothing is deleted until you empty the bin.
+Nothing moves until you approve a decision in the app. Nothing is deleted until you empty the bin.
 
 ## Pieces
 
@@ -28,7 +28,8 @@ Nothing moves until you decide in the app. Nothing is deleted until you empty th
   `~/claude-roon/flac_migrate.py`'s `build_plan()`, the same code the migration used.
 - `~/.local/state/sift/`: `queue.json`, `bin.json`, `overrides.json`, `history.json` (what left
   the bin: emptied, undone, failed in a batch), `notify.json` (the last jot), `covers/`,
-  `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `pending/` (decisions in
+  `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `staged.json` (decisions
+  waiting for approval), `pending/` (decisions in
   progress), the `lock` files and the two cron logs.
 - Cron runs `sift.py check` at 25 minutes past every second hour, just after `soularr_maintenance.py`.
   If albums have arrived that weren't there at the last jot, it leaves Simon a jot in
@@ -60,8 +61,16 @@ Nothing moves until you decide in the app. Nothing is deleted until you empty th
   release Soularr looks for (Soularr's `use_selected_lidarr_release` is on for this).
 - The bin can keep entries for a set number of days and empty only the older ones, still
   with the password. The daily jot says how re-fetched albums came back.
-- Search, sort (artist, newest, reason), and **Select** to decide several albums at once:
-  one job, one bin entry per album.
+- **Staging.** Keep FLAC, Keep MP3, Get a better FLAC and Put in the bin don't run when
+  pressed: the album moves to the **Staged** tab and the next one opens. There every decision
+  starts ticked; untick any you're unsure of, or **Remove** one to send the album back to its
+  queue, then **Approve** runs the ticked ones as one job, one bin entry per album. An album
+  that fails is skipped and named, and the rest go ahead. Stage all (Ready), Select and the
+  1/2/3 keys stage too. Watch, Looks fine, Block and the track tools still act at once, since
+  they move no album. The server alone writes `staged.json` and drops an entry whose album
+  has left the queue or no longer allows the decision.
+- Search, sort (artist, newest, reason), and **Select** to stage one decision for several albums.
+- **Previous** and **Next** in the player step through the album's tracks (↑/↓ on a keyboard).
 - **Match volume** in the player turns the louder version down to the quieter one's loudness
   (Web Audio, built on the first tap that needs it).
 - **History**: every decision and what became of it, with totals.
@@ -95,7 +104,8 @@ the half-moved files back together.
 
 The browser sends album ids or a bin entry id and a decision name from a fixed list, nothing
 else. The server checks the id against `queue.json`/`bin.json` and runs `sift.py` with a
-fixed argv. File paths never leave the server, and audio and spectrograms are only served
+fixed argv. Absolute file paths never leave the server (Library duplicates show each
+file's path inside its music folder, e.g. `FLAC/Artist/Album/01.flac`, and nothing outside them), and audio and spectrograms are only served
 from the four music folders (symlinks resolved first).
 
 Nothing moves unless both drives it touches are mounted: an unmounted drive's mount point is
@@ -111,6 +121,7 @@ addresses are refused.
 ```
 python3 ~/sift/bin/sift.py check                    # re-check now
 python3 ~/sift/bin/sift.py resolve-many keep_mp3 1,2 # one decision for several albums
+python3 ~/sift/bin/sift.py apply-staged 1:keep_flac,2:refetch:0  # what Approve runs
 python3 ~/sift/bin/sift.py adopt PATH "label"       # put an existing folder in the bin
 systemctl --user restart sift
 npm test                                            # server tests, then engine tests in a sandbox

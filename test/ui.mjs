@@ -86,7 +86,7 @@ try {
   await page.click('#go');
   await page.waitForURL(BASE + '/app');
   await page.waitForSelector('.queue');
-  check(await page.locator('#approve').textContent() === 'Approve all 1', 'Ready queue offers Approve all');
+  check(await page.locator('#approve').textContent() === 'Stage all 1', 'Ready queue offers Stage all');
   check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'queue tabs with counts');
   check(await page.locator('section.queue').count() === 1 && await page.locator('#q-ready').count() === 1, 'only the Ready tab shows at first');
   await page.click('[data-tab="suspect"]');
@@ -111,11 +111,30 @@ try {
   check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
   check((await page.locator('[data-many="keep_mp3"]').textContent()) === 'Keep MP3 (1)', 'a decision says how many albums it applies to');
   await page.click('[data-many="refetch"]');
-  check((await page.locator('#dtitle').textContent()) === 'Get a better FLAC for 2 albums?', 'confirm names the count');
+  await page.waitForSelector('[data-tab="staged"]');
+  check(!calls().some((c) => /resolve|apply-staged/.test(c)), 'a decision on the selection is staged, and nothing runs');
+  check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 0|Different or unconfirmed 2|Health 1',
+    'the staged albums leave their queues for a Staged tab');
+
+  console.log('staged');
+  await page.click('[data-tab="staged"]');
+  check(await page.locator('.stagedrow').count() === 2 && (await page.locator('.badge.decision').first().textContent()) === 'Get a better FLAC',
+    'each staged album says what it will do');
+  check((await page.locator('#applystaged').textContent()) === 'Approve 2', 'everything starts ticked');
+  await page.locator('input[data-approve="3"]').uncheck();
+  check((await page.locator('#applystaged').textContent()) === 'Approve 1', 'unticking leaves it out');
+  await page.click('#applystaged');
+  check((await page.locator('#dbody').textContent()).startsWith('Get a better FLAC: 1'), 'approving confirms what will happen');
   await page.click('#dok');
   await page.waitForTimeout(1500);
-  check(calls().some((c) => /resolve-many refetch (2,3|3,2)$/.test(c)), 'the selection goes as one job');
-  check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
+  check(calls().some((c) => c.endsWith('apply-staged 2:refetch')), 'only the ticked decision runs');
+  await page.click('[data-tab="staged"]').catch(() => {});
+  await page.waitForSelector('[data-unstage="3"]');
+  await page.click('[data-unstage="3"]');
+  await page.waitForTimeout(300);
+  check(await page.locator('[data-tab="staged"]').count() === 0 && await page.locator('[data-tab="suspect"]').count() === 1,
+    'Remove sends an album back to its queue, and the tab goes when empty');
   await page.click('[data-tab="ready"]');
 
   await page.click('[data-tab="different"]');
@@ -272,10 +291,14 @@ try {
   await page.waitForSelector('.diag >> text=Three');
   check(true, 'K goes back');
   await page.keyboard.press('2');
-  check((await page.locator('#dtitle').textContent()) === 'Keep MP3?', '2 asks to Keep MP3');
-  await page.click('#dok');
   await page.waitForSelector('.diag >> text=missing', { timeout: 8000 }).catch(() => {});
-  check(calls().some((c) => c.endsWith('resolve 1 keep_mp3')) && page.url().endsWith('#/album/4'), 'after the decision, the next album opens');
+  check(!calls().some((c) => c.endsWith('keep_mp3')) && page.url().endsWith('#/album/4'), '2 stages Keep MP3 and the next album opens');
+  await page.goto(BASE + '/app#/album/1');
+  await page.waitForSelector('.stagednote');
+  check((await page.locator('.stagednote b').textContent()) === 'Keep MP3', 'a staged album says so');
+  await page.click('#unstage');
+  await page.waitForTimeout(500);
+  check(await page.locator('.stagednote').count() === 0, 'and Remove unstages it there');
 
   console.log('library health');
   await page.goto(BASE + '/app#/album/800000001');
@@ -293,8 +316,41 @@ try {
   check(await page.locator('#dselect').isVisible() && (await page.locator('#dselect').inputValue()) === '1', "the MP3's release is preselected");
   await page.selectOption('#dselect', '0');
   await page.click('#dok');
-  await page.waitForTimeout(1500);
-  check(calls().some((c) => c.endsWith('resolve 4 refetch 0')), 'the chosen release goes as an index');
+  await page.waitForTimeout(800);
+  const staged4 = await page.evaluate(async () => (await (await fetch('/api/state')).json()).staged.find((e) => e.id === 4));
+  check(staged4 && staged4.release === '1999 · Next One · CD · UK', 'the chosen release is staged with it');
+  await page.evaluate(async () => {
+    const { csrf } = await (await fetch('/api/csrf')).json();
+    await fetch('/api/unstage', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF': csrf }, body: JSON.stringify({ ids: [4] }) });
+  });
+
+  console.log('buffering');
+  await page.goto(BASE + '/app#/album/2');
+  await page.waitForSelector('.play[data-side="flac"]');
+  await page.route('**/api/audio/**', async (r) => { await new Promise((res) => setTimeout(res, 1500)); await r.continue(); });
+  await page.click('.play[data-side="flac"]');
+  await page.waitForTimeout(400);
+  check(await page.locator('#pp.loading').count() === 1 && await page.locator('.play.on.loading').count() === 1
+    && (await page.locator('#ptime').textContent()) === 'Loading…', 'a track still loading spins, and says so');
+  await page.waitForFunction(() => !document.querySelector('#pp.loading'), null, { timeout: 8000 }).catch(() => {});
+  check(await page.locator('.loading').count() === 0, 'and stops once it plays');
+  await page.unroute('**/api/audio/**');
+  await page.click('#pclose');
+
+  console.log('previous and next');
+  await page.goto(BASE + '/app#/album/1');
+  await page.waitForSelector('.play[data-side="mp3"]');
+  await page.locator('.play[data-side="mp3"]').first().click();
+  await page.waitForTimeout(300);
+  check(await page.locator('#pprev').isDisabled() && await page.locator('#pnext').isEnabled(), 'on the first track only Next is offered');
+  await page.click('#pnext');
+  await page.waitForTimeout(300);
+  check((await page.locator('#ptitle').textContent()) === 'Two' && await page.locator('#pprev').isEnabled(), 'Next plays the next track');
+  await page.click('#pprev');
+  await page.waitForTimeout(300);
+  check((await page.locator('#ptitle').textContent()) === 'One', 'and Previous goes back');
+  await page.click('#pclose');
+  errors.length = 0; // the album has no audio files, so the decks' load errors are expected here
 
   console.log('one album and bin view');
   await openAlbum();

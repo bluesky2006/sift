@@ -1,11 +1,13 @@
 'use strict';
 // Sift's page. Four views on the hash: #/ the queues, #/album/<id>, #/bin, #/history.
-// Every change is a POST of an id and a decision name; the server does the rest.
+// Every change is a POST of an id and a decision name; the server does the rest. Album
+// decisions are staged, and only move files once approved from the Staged tab.
 
 const $ = (id) => document.getElementById(id);
 const view = $('view');
 
 const QUEUES = [
+  ['staged', 'Staged', "Decisions waiting for your approval. Nothing has moved yet. Untick any you're unsure of, then approve the rest."],
   ['ready', 'Ready', 'Exact matches: every track matches the MP3 by fingerprint and every FLAC file decodes cleanly.'],
   ['suspect', 'Suspect FLAC', 'Most FLAC tracks stop short of the top of the spectrum, as a FLAC made from an MP3 does. Compare the spectrograms before deciding: some old or lo-fi recordings stop early too.'],
   ['different', 'Different or unconfirmed version', "The fingerprints don't prove the FLAC is the same recording as the MP3."],
@@ -16,7 +18,7 @@ const QUEUES = [
   ['dupes', 'Library duplicates', 'Albums in both the Roon FLAC library and the MP3 library, matched by folder name. Keep FLAC puts the MP3 in the bin; Keep MP3 puts the FLAC in the bin.'],
   ['arriving', 'Arriving', 'Imported in the last few hours; checked once Soularr has finished with them.'],
 ];
-const SHORT = { different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health' };
+const SHORT = { staged: 'Staged', different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health' };
 const DECISION_TEXT = {
   keep_flac: ['Keep FLAC', 'The FLAC moves into the Roon FLAC library and the MP3 goes in the bin.'],
   keep_mp3: ['Keep MP3', "The FLAC goes in the bin and Soularr won't fetch this album again."],
@@ -37,6 +39,7 @@ let search = '';
 let sortBy = localStorage.getItem('sift-sort') || 'artist';
 let tab = localStorage.getItem('sift-tab') || 'ready';
 let selecting = false;
+const unticked = new Set();   // staged decisions left out of the next approval
 const selected = new Set();
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -79,6 +82,10 @@ function ago(iso) {
 const khz = (hz) => (hz ? `${(hz / 1000).toFixed(1)} kHz` : '–');
 const gb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
 const isNew = (i) => state.previous_check && i.first_seen > state.previous_check;
+const stagedOf = (id) => (state.staged || []).find((e) => e.id === id);
+// a staged album leaves its queue for the Staged tab until it is approved or unstaged
+const queueOf = (i) => (stagedOf(i.id) ? 'staged' : i.queue);
+const stagedText = (e) => (DECISION_TEXT[e.decision] || [e.decision])[0] + (e.release ? ` · ${e.release}` : '');
 
 function toast(text) {
   const t = $('toast');
@@ -120,11 +127,13 @@ function ask({ title, body, ok = 'OK', password = false, danger = false, error =
 function renderStatus() {
   const items = state.items;
   const fresh = items.filter(isNew).length;
-  const ready = items.filter((i) => i.queue === 'ready').length;
+  const staged = items.filter((i) => stagedOf(i.id)).length;
+  const ready = items.filter((i) => queueOf(i) === 'ready').length;
   const binBytes = state.bin.reduce((n, e) => n + e.bytes, 0);
   $('status').textContent = `Checked ${ago(state.checked)}`
     + (fresh ? ` · ${fresh} new since the check before` : '')
-    + ` · ${ready} ready · ${items.length - ready} to review`;
+    + ` · ${ready} ready · ${items.length - ready - staged} to review`
+    + (staged ? ` · ${staged} staged` : '');
   $('binlink').textContent = state.bin.length ? `Bin (${gb(binBytes)})` : 'Bin';
 }
 
@@ -147,11 +156,16 @@ async function watchJob() {
         await loadState();
         if (job.ok && afterJob) { const go = afterJob; afterJob = null; location.hash = go; }
         if (!job.ok) afterJob = null;
-        if (job.ok) {
+        if (job.ok && /^skipped /m.test(job.output)) {
+          // some went ahead and some didn't: keep the bar open with what was skipped
+          $('joboutput').textContent = job.output;
+          $('joboutput').hidden = false;
+          $('jobclose').hidden = false;
+        } else if (job.ok) {
           setTimeout(() => { bar.hidden = true; }, 2500);
           const note = { keep_flac: 'Moved into the FLAC library. Undo is in the bin.',
             keep_mp3: 'Done. Undo is in the bin.', refetch: 'FLAC is in the bin and Soularr will look again.',
-            'empty-bin': 'Bin emptied.', undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
+            'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
           if (note) toast(note);
         } else {
           $('joboutput').textContent = job.output;
@@ -203,6 +217,13 @@ function row(i) {
     <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
     <span class="rreason">${esc((i.diagnosis && i.diagnosis.text) || (i.reasons || [])[0] || '')}</span>
     <span class="badges">${badges.join('')}</span></span>`;
+  const st = stagedOf(i.id);
+  if (st) {
+    return `<div class="row stagedrow"><input type="checkbox" class="approvepick" data-approve="${i.id}" ${unticked.has(i.id) ? '' : 'checked'}
+      aria-label="Approve ${esc(i.artist)} — ${esc(i.title)}"><a class="rlink" href="#/album/${i.id}">${inner.replace('<span class="badges">',
+        `<span class="badges"><span class="badge decision">${esc(stagedText(st))}</span>`)}</a>
+      <button class="ghost small" data-unstage="${i.id}">Remove</button></div>`;
+  }
   if (selecting) {
     return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
       aria-label="Select ${esc(i.artist)} — ${esc(i.title)}">${inner}</label>`;
@@ -226,7 +247,7 @@ function renderList() {
     $('selecting').onclick = () => { selecting = !selecting; selected.clear(); renderList(); };
   }
   $('selecting').textContent = selecting ? 'Cancel' : 'Select';
-  const byQueue = (key) => state.items.filter((i) => i.queue === key && matches(i)).sort(SORTS[sortBy][1]);
+  const byQueue = (key) => state.items.filter((i) => queueOf(i) === key && matches(i)).sort(SORTS[sortBy][1]);
   const shown = [];
   for (const [key, name, blurb] of QUEUES) {
     const items = byQueue(key);
@@ -242,8 +263,9 @@ function renderList() {
   } else {
     const { key, name, blurb, items } = cur;
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
-      + (selecting && items.length ? `<button class="ghost small" data-all="${key}">Select all</button>` : '')
-      + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">Approve all ${items.length}</button>` : '')
+      + (selecting && items.length && key !== 'staged' ? `<button class="ghost small" data-all="${key}">Select all</button>` : '')
+      + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">Stage all ${items.length}</button>` : '')
+      + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
     $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
       + (items.length ? items.map(row).join('') : '<p class="empty">Nothing waiting.</p>') + '</section>';
@@ -271,13 +293,50 @@ function renderList() {
   const approve = $('approve');
   if (approve) {
     approve.onclick = async () => {
-      const n = state.items.filter((i) => i.queue === 'ready').length;
-      const ok = await ask({ title: `Approve all ${n}?`, ok: 'Approve all',
-        body: 'Each FLAC moves into the Roon FLAC library and its MP3 goes in the bin. Each one can be undone from the bin.' });
-      if (ok) run('/api/approve-ready', {});
+      await stageDecision('/api/approve-ready', {});
     };
   }
+  view.querySelectorAll('[data-approve]').forEach((c) => {
+    c.onchange = () => { const id = Number(c.dataset.approve); if (c.checked) unticked.delete(id); else unticked.add(id); renderApproveButton(); };
+  });
+  view.querySelectorAll('[data-unstage]').forEach((b) => {
+    b.onclick = async () => {
+      try { await api('/api/unstage', { ids: [Number(b.dataset.unstage)] }); } catch (e) { toast(e.message); return; }
+      await loadState();
+      renderList();
+    };
+  });
+  renderApproveButton();
   renderSelection();
+}
+
+// Approving is the step that moves files: it confirms, naming what each decision will do.
+function renderApproveButton() {
+  const b = $('applystaged');
+  if (!b) return;
+  const go = state.staged.filter((e) => !unticked.has(e.id));
+  b.textContent = `Approve ${go.length}`;
+  b.disabled = !go.length;
+  b.onclick = async () => {
+    const counts = {};
+    for (const e of go) counts[e.decision] = (counts[e.decision] || 0) + 1;
+    const body = Object.entries(counts).map(([d, n]) => `${DECISION_TEXT[d][0]}: ${n}`).join(' · ')
+      + '. Each album gets its own bin entry, so each can be undone on its own.';
+    const ok = await ask({ title: `Approve ${go.length} decision${go.length === 1 ? '' : 's'}?`, body, ok: 'Approve' });
+    if (!ok) return;
+    go.forEach((e) => unticked.delete(e.id));
+    run('/api/apply-staged', { ids: go.map((e) => e.id) });
+  };
+}
+
+// Staging only records a decision, so it doesn't ask first; approving does.
+async function stageDecision(path, body, next) {
+  let r;
+  try { r = await api(path, body); } catch (e) { toast(e.message); return false; }
+  await loadState();
+  toast(`Staged ${r.staged === 1 ? 'a decision' : `${r.staged} decisions`}. Approve in the Staged tab.`);
+  if (next !== undefined) location.hash = next; else route();
+  return true;
 }
 
 // the bar of decisions for the albums ticked in Select mode
@@ -296,15 +355,9 @@ function renderSelection() {
     b.disabled = !n;
     b.onclick = async () => {
       const ids = picked.filter((i) => i.allowed.includes(d)).map((i) => i.id);
-      const skip = picked.length - ids.length;
-      const ok = await ask({ title: `${DECISION_TEXT[d][0]} for ${ids.length} album${ids.length === 1 ? '' : 's'}?`, ok: DECISION_TEXT[d][0],
-        body: `${DECISION_TEXT[d][1]} Each album gets its own bin entry, so each can be undone on its own.`
-          + (skip ? ` ${skip} of those selected can't take this decision and will be left alone.` : '') });
-      if (!ok) return;
       selecting = false;
       selected.clear();
-      renderList();
-      run('/api/decide-many', { decision: d, ids });
+      await stageDecision('/api/decide-many', { decision: d, ids });
     };
   });
 }
@@ -314,7 +367,7 @@ $('selcancel').onclick = () => { selecting = false; selected.clear(); renderList
 
 // the albums around this one in its queue, in the list's order and search
 function neighbours(a) {
-  const list = state.items.filter((i) => i.queue === a.queue && matches(i)).sort(SORTS[sortBy][1]);
+  const list = state.items.filter((i) => queueOf(i) === queueOf(a) && matches(i)).sort(SORTS[sortBy][1]);
   const k = list.findIndex((i) => i.id === a.id);
   return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null };
 }
@@ -347,7 +400,8 @@ function cell(a, side, idx, rowIdx) {
     <span class="ttext"><span class="ttitle">${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
       ? ` · <span class="${side === 'flac' && t.cutoff < SUSPECT_HZ ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
-      ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}</span></div>`;
+      ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}${a.paths && a.paths[side][idx]
+      ? `<span class="tpath">${esc(a.paths[side][idx])}</span>` : ''}</span></div>`;
 }
 
 const SUSPECT_HZ = 20500;     // bin/sift.py's line: a FLAC track stopping below it is flagged
@@ -498,7 +552,9 @@ async function renderAlbum(id, keepMode = false) {
   if (mode === 'order' && (!pending || pending.length !== a.flac.tracks.length)) pending = a.flac.tracks.map((_, k) => k);
   document.title = `${a.artist} — ${a.title} · Sift`;
   const qname = (QUEUES.find((q) => q[0] === a.queue) || [])[1] || a.queue;
-  const texts = a.dupe ? DUPE_TEXT : DECISION_TEXT;
+  const texts = !a.dupe ? DECISION_TEXT : { ...DUPE_TEXT, refetch: ['Get a better FLAC', a.lidarr_flac
+    ? `The FLAC goes in the bin and the MP3 stays. Lidarr-FLAC has this album${a.lidarr_flac.monitored ? ', already monitored,' : ''} and Soularr will look for a FLAC; a full copy comes back through the review queue.`
+    : "The FLAC goes in the bin and the MP3 stays. Lidarr-FLAC doesn't have this album (usually because MusicBrainz doesn't), so nothing will look for a FLAC: this is the same as Keep MP3 for now."] };
   const diag = a.diagnosis;
   // with a diagnosis, only its suggestion is highlighted, or nothing when it says listen first
   const primary = diag ? (a.allowed.includes(diag.suggest) ? diag.suggest : null) : 'keep_flac';
@@ -517,6 +573,7 @@ async function renderAlbum(id, keepMode = false) {
       <div><p class="qname">${esc(qname)}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
       <p class="totals">${esc(totals)}</p></div>
     </div>
+    ${stagedOf(a.id) ? `<p class="stagednote">Staged: <b>${esc(stagedText(stagedOf(a.id)))}</b>. Nothing has moved yet. <button class="ghost small" id="unstage">Remove</button></p>` : ''}
     ${diag ? `<p class="diag">${esc(diag.text)}</p>` : ''}
     <ul class="reasons">${a.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
     ${a.source ? `<p class="source">From Soulseek user <b>${esc(a.source.user)}</b>${a.source.albums > 1 ? ` · ${a.source.albums} albums from them waiting here` : ''}${a.source.bad
@@ -543,14 +600,25 @@ async function renderAlbum(id, keepMode = false) {
       }
       const label = (r) => [r.date.slice(0, 4), r.title, r.format, r.country, r.label, `${r.tracks} tracks`].filter(Boolean).join(' · ')
         + (r.release === (a.mp3 && a.mp3.details && a.mp3.details.release) ? ' (the MP3’s release)' : '');
-      const answer = await ask({ title: `${title}?`, body, ok: title, choices: rels && rels.map(label), chosen });
-      if (answer) {
-        const n = neighbours(a).next || neighbours(a).prev;
-        afterJob = n ? `#/album/${n.id}` : '#/';
-        run('/api/decide', { id: a.id, decision: b.dataset.decide, ...(rels ? { release: answer.choice } : {}) });
-      }
+      const stageable = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album'].includes(b.dataset.decide);
+      // staging asks only when there is a release to choose; Looks fine runs now, so it asks
+      // a duplicate's re-fetch depends on whether Lidarr-FLAC has the album, so it says which
+      const answer = stageable && !rels && !(a.dupe && b.dataset.decide === 'refetch') ? true
+        : await ask({ title: `${title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
+      if (!answer) return;
+      const n = neighbours(a).next || neighbours(a).prev;
+      const decision = { id: a.id, decision: b.dataset.decide, ...(rels ? { release: answer.choice } : {}) };
+      if (!stageable) { afterJob = n ? `#/album/${n.id}` : '#/'; run('/api/decide', decision); return; }
+      await stageDecision('/api/decide', decision, n && n.id !== a.id ? `#/album/${n.id}` : '#/');
     };
   });
+  if ($('unstage')) {
+    $('unstage').onclick = async () => {
+      try { await api('/api/unstage', { ids: [a.id] }); } catch (e) { toast(e.message); return; }
+      await loadState();
+      renderAlbum(a.id, true);
+    };
+  }
   view.querySelectorAll('.play').forEach((b) => {
     b.onclick = (ev) => {
       ev.stopPropagation();
@@ -745,11 +813,15 @@ function showPlaying() {
   $('pside').className = `side ${playing.side}`;
   $('ptitle').textContent = t.title || t.name;
   $('ab').disabled = !partnerOf(playing);
+  const here = album && playing.album.id === album.id;
+  $('pprev').disabled = !here || !stepTarget(-1);
+  $('pnext').disabled = !here || !stepTarget(1);
   $('seek').max = active.duration || 0;
   $('plen').textContent = clock(active.duration);
   view.querySelectorAll('.play.on').forEach((b) => b.classList.remove('on'));
   const btn = view.querySelector(`.play[data-side="${playing.side}"][data-idx="${playing.idx}"][data-row="${playing.row}"]`);
   if (btn) btn.classList.add('on');
+  showBuffering();
   applyGains();
 }
 
@@ -803,7 +875,24 @@ $('pclose').onclick = () => {
   playing = null;
   view.querySelectorAll('.play.on').forEach((b) => b.classList.remove('on'));
 };
+// Buffering: the active deck has been asked to play but hasn't enough data to. The play
+// button and the track's own button spin until it has.
+function showBuffering() {
+  const on = !!playing && !active.paused && active.readyState < 3 && !active.error;
+  $('pp').classList.toggle('loading', on);
+  view.querySelectorAll('.play.loading').forEach((b) => b.classList.remove('loading'));
+  if (on) view.querySelectorAll('.play.on').forEach((b) => b.classList.add('loading'));
+  $('ptime').textContent = on && active.currentTime < 0.1 ? 'Loading…' : clock(active.currentTime);
+}
 for (const d of decks) {
+  for (const ev of ['loadstart', 'waiting', 'playing', 'canplay', 'pause', 'seeking', 'seeked', 'emptied']) {
+    d.addEventListener(ev, () => { if (d === active) showBuffering(); });
+  }
+  d.addEventListener('error', () => {
+    if (d !== active || !d.getAttribute('src')) return;
+    showBuffering();
+    toast("Couldn't load this track.");
+  });
   d.addEventListener('play', () => { if (d === active) $('pp').textContent = '❚❚'; });
   d.addEventListener('pause', () => { if (d === active) $('pp').textContent = '▶'; });
   d.addEventListener('timeupdate', () => {
@@ -903,8 +992,10 @@ async function renderHistory() {
 
 // ---- keyboard (desktop) ----------------------------------------------------------
 
-function keyRows(dir) {
-  if (!album) return;
+// The track before or after the one playing, in the album's row order: the same side if
+// that row has it, otherwise the other side. Null at either end.
+function stepTarget(dir) {
+  if (!album) return null;
   const rows = album.rows;
   const side = playing ? playing.side : 'mp3';
   let k = playing && playing.album.id === album.id ? playing.row + dir : (dir > 0 ? 0 : rows.length - 1);
@@ -912,10 +1003,18 @@ function keyRows(dir) {
     const r = rows[k];
     const idx = side === 'mp3' ? r.m : r.f;
     const other = side === 'mp3' ? r.f : r.m;
-    if (idx != null) return play(side, idx, k);
-    if (other != null) return play(side === 'mp3' ? 'flac' : 'mp3', other, k);
+    if (idx != null) return [side, idx, k];
+    if (other != null) return [side === 'mp3' ? 'flac' : 'mp3', other, k];
   }
+  return null;
 }
+
+function keyRows(dir) {
+  const t = stepTarget(dir);
+  if (t) play(...t);
+}
+$('pprev').onclick = () => keyRows(-1);
+$('pnext').onclick = () => keyRows(1);
 
 document.addEventListener('keydown', (ev) => {
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return;

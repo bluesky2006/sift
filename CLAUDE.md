@@ -6,6 +6,8 @@ rules to keep and the lessons from the first build, are in `~/notes/sift-feature
 
 - The browser sends ids, decision names and integer indexes only. Paths come from
   `queue.json`/`bin.json` on the server, and keys starting with `_` never leave it.
+  The one exception: Library duplicates show each file's path relative to its music folder
+  (`FLAC/Artist/Album/01.flac`), never an absolute path.
 - Every file change goes through `bin/sift.py` and is recorded in `bin.json` for Undo.
   Emptying the bin is the only delete.
 - Classification lives in `~/claude-roon/flac_migrate.py` (outside this repo). Bump

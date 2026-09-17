@@ -114,6 +114,35 @@ const scrub = (text) => String(text || '')
   .replace(/(^|[\s(=])\/[^\n;()]*?(?=: |:$|,? \(|;|\)|\n|$)/gm, '$1…');
 const jobView = (j) => j && { kind: j.kind, label: j.label, done: j.done, ok: j.ok, output: scrub(j.output) };
 
+// ---- staging ---------------------------------------------------------------
+// Album decisions are staged, not run: staged.json holds { id, decision, release, at } per
+// album until they are approved. The server is its only writer; approving takes the
+// entries out before the engine starts on them.
+const STAGEABLE = new Set(['keep_flac', 'keep_mp3', 'refetch', 'bin_album']);
+async function readStaged(q) {
+  const s = await readState('staged.json', { entries: [] });
+  // an album decided elsewhere, gone from the queue or no longer allowing the decision drops out
+  return s.entries.filter((e) => {
+    const item = q.items.find((i) => i.id === e.id);
+    return item && item.queue !== 'arriving' && item.allowed.includes(e.decision)
+      && (e.release == null || e.release < (item.releases || []).length);
+  });
+}
+async function writeStaged(entries) {
+  await fsp.writeFile(path.join(STATE, 'staged.json.tmp'), JSON.stringify({ entries }));
+  await fsp.rename(path.join(STATE, 'staged.json.tmp'), path.join(STATE, 'staged.json'));
+  cache.delete(path.join(STATE, 'staged.json'));   // two writes in one millisecond share an mtime
+}
+// read-change-write on staged.json one request at a time
+let stagedLock = Promise.resolve();
+const withStaged = (fn) => { const run = stagedLock.then(fn); stagedLock = run.catch(() => {}); return run; };
+const stage = (q, adds) => withStaged(async () => {
+  const ids = new Set(adds.map((e) => e.id));
+  const kept = (await readStaged(q)).filter((e) => !ids.has(e.id));
+  const at = new Date().toISOString();
+  await writeStaged([...kept, ...adds.map((e) => ({ id: e.id, decision: e.decision, release: e.release ?? null, at }))]);
+});
+
 // ---- jobs ------------------------------------------------------------------
 // One engine run at a time from the app. The scheduled check takes the engine's own
 // lock, so a decision pressed during a check simply waits for it.
@@ -316,6 +345,11 @@ async function handle(req, res) {
       built: q.built, checked: q.checked, previous_check: q.previous_check, items,
       bin: b.entries.map((e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 }))
         .reverse(),
+      staged: (await readStaged(q)).map((e) => {
+        const r = e.release != null && (q.items.find((i) => i.id === e.id).releases || [])[e.release];
+        return { id: e.id, decision: e.decision, at: e.at,
+          release: r ? [r.date && r.date.slice(0, 4), r.title, r.format, r.country].filter(Boolean).join(' · ') : null };
+      }),
       job: jobView(job),
       settings: await readState('settings.json', {}),
     });
@@ -325,7 +359,16 @@ async function handle(req, res) {
   if ((m = /^\/api\/album\/(\d+)$/.exec(p)) && req.method === 'GET') {
     const q = await readState('queue.json', { items: [] });
     const item = q.items.find((i) => i.id === Number(m[1]));
-    return item ? json(res, 200, pub(item)) : json(res, 404, { error: 'not in the queue' });
+    if (!item) return json(res, 404, { error: 'not in the queue' });
+    // Library duplicates show where each copy lives, as the path inside its music folder
+    // ("FLAC/Artist/Album/01.flac"): never the absolute path, and nothing outside the roots.
+    const inRoot = (f) => {
+      const root = AUDIO_ROOTS.find((r) => f.startsWith(r + '/'));
+      return root ? path.relative(path.dirname(root), f) : null;
+    };
+    const paths = item.dupe && item._files
+      ? { flac: (item._files.flac || []).map(inRoot), mp3: (item._files.mp3 || []).map(inRoot) } : undefined;
+    return json(res, 200, { ...pub(item), ...(paths ? { paths } : {}) });
   }
 
   if ((m = /^\/api\/audio\/(\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -386,6 +429,11 @@ async function handle(req, res) {
         }
         args.push(String(body.release));
       }
+      if (STAGEABLE.has(body.decision)) {
+        await stage(q, [{ id, decision: body.decision, release: body.release }]);
+        audit({ event: 'stage', id, decision: body.decision, release: body.release, label });
+        return json(res, 200, { staged: 1 });
+      }
       audit({ event: 'decide', id, decision: body.decision, release: body.release, label });
       const j = startJob(body.decision, args, label);
       return j ? json(res, 202, { job: j.id }) : busy();
@@ -400,11 +448,9 @@ async function handle(req, res) {
         return item && item.allowed.includes(body.decision);
       });
       if (!ids.length) return json(res, 400, { error: 'not available for any of these albums' });
-      const label = `${{ keep_flac: 'Keep FLAC', keep_mp3: 'Keep MP3', refetch: 'Get a better FLAC' }[body.decision]}`
-        + ` for ${ids.length} album${ids.length === 1 ? '' : 's'}`;
-      audit({ event: 'decide-many', ids, decision: body.decision });
-      const j = startJob(body.decision, ['resolve-many', body.decision, ids.join(',')], label);
-      return j ? json(res, 202, { job: j.id, n: ids.length }) : busy();
+      await stage(q, ids.map((id) => ({ id, decision: body.decision })));
+      audit({ event: 'stage-many', ids, decision: body.decision });
+      return json(res, 200, { staged: ids.length });
     }
     if (p === '/api/track') {
       // track tools: every argument is an integer index, checked against the album
@@ -443,9 +489,46 @@ async function handle(req, res) {
       return j ? json(res, 202, { job: j.id }) : busy();
     }
     if (p === '/api/approve-ready') {
-      audit({ event: 'approve-ready' });
-      const j = startJob('approve-ready', ['approve-ready'], 'Approve all ready albums');
-      return j ? json(res, 202, { job: j.id }) : busy();
+      // stages Keep FLAC for every ready album; nothing moves until the staged list is approved
+      const q = await readState('queue.json', { items: [] });
+      const ids = q.items.filter((i) => i.queue === 'ready' && i.allowed.includes('keep_flac')).map((i) => i.id);
+      if (!ids.length) return json(res, 400, { error: 'nothing ready' });
+      await stage(q, ids.map((id) => ({ id, decision: 'keep_flac' })));
+      audit({ event: 'stage-ready', ids });
+      return json(res, 200, { staged: ids.length });
+    }
+    if (p === '/api/unstage') {
+      if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 1000 || !body.ids.every(Number.isInteger)) {
+        return json(res, 400, { error: 'bad ids' });
+      }
+      const q = await readState('queue.json', { items: [] });
+      const drop = new Set(body.ids);
+      await withStaged(async () => writeStaged((await readStaged(q)).filter((e) => !drop.has(e.id))));
+      audit({ event: 'unstage', ids: body.ids });
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/apply-staged') {
+      // the ids to approve; what each one does comes from staged.json, never the request
+      if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 1000 || !body.ids.every(Number.isInteger)) {
+        return json(res, 400, { error: 'bad ids' });
+      }
+      const q = await readState('queue.json', { items: [] });
+      const want = new Set(body.ids);
+      const r = await withStaged(async () => {
+        if (job && !job.done) return 'busy';
+        const staged = await readStaged(q);
+        const go = staged.filter((e) => want.has(e.id));
+        if (!go.length) return 'none';
+        const spec = go.map((e) => [e.id, e.decision, ...(e.release != null ? [e.release] : [])].join(':')).join(',');
+        audit({ event: 'apply-staged', entries: go });
+        const j = startJob('apply-staged', ['apply-staged', spec], `Approving ${go.length} decision${go.length === 1 ? '' : 's'}`);
+        await writeStaged(staged.filter((e) => !want.has(e.id)));
+        return { j, go };
+      });
+      if (r === 'busy') return busy();
+      if (r === 'none') return json(res, 400, { error: 'none of those are staged' });
+      const { j, go } = r;
+      return json(res, 202, { job: j.id, n: go.length });
     }
     if (p === '/api/check') {
       const j = startJob('check', ['check'], 'Checking for new arrivals');

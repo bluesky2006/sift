@@ -36,6 +36,10 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     suspect: { low: 1, of: 1, hz: 16000, mp3_hz: null },
     flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
+  }, {
+    id: 6, artist: 'Dup', title: 'Both', queue: 'dupes', dupe: true, reasons: ['r'], allowed: ['keep_flac', 'keep_mp3'],
+    flac: { tracks: [{ name: 'a.flac' }, { name: 'b.flac' }] }, mp3: { tracks: [{ name: 'a.mp3' }] }, pairs: [], cover: false,
+    _do: { kind: 'dupe' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/secret/elsewhere/b.flac'], mp3: [path.join(MUSIC, 'Art/Alb/a.mp3')] },
   }],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -93,6 +97,13 @@ try {
   check(!st.includes('_do') && !st.includes('_files') && !st.includes(MUSIC), 'state carries no paths');
   check(!al.includes('_do') && !al.includes('_files') && !al.includes('/secret/dir'), 'album carries no paths');
   check(!al.includes('_path') && !al.includes('/secret/nested'), 'nor any nested _ key');
+  const dup = await (await req('/api/album/6')).json();
+  const base = path.basename(MUSIC);
+  check(dup.paths && dup.paths.flac[0] === `${base}/Art/Alb/01.flac` && dup.paths.mp3[0] === `${base}/Art/Alb/a.mp3`,
+    'a library duplicate shows each file inside its music folder');
+  check(dup.paths.flac[1] === null && !JSON.stringify(dup).includes(MUSIC) && !JSON.stringify(dup).includes('/secret'),
+    'never an absolute path, nor a file outside the music folders');
+  check(!al.includes('"paths"'), 'and other albums carry none');
   const wrongHost = await new Promise((ok) => http.get({ host: '127.0.0.1', port: PORT, path: '/api/auth/status', headers: { Host: 'evil.example' } },
     (r) => { r.resume(); ok(r.statusCode); }));
   check(wrongHost === 421, 'a request for another host name is refused');
@@ -126,46 +137,67 @@ try {
   check((await req('/api/audio/1/flac/9')).status === 404, 'an index past the end is refused');
   check((await req('/api/audio/3/flac/0')).status === 404, 'an album not in the queue is refused');
 
-  console.log('decisions');
+  console.log('decisions are staged');
+  const stagedNow = async () => (await (await req('/api/state')).json()).staged;
+  const lastCall = () => { try { return fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop(); } catch { return ''; } };
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' } })).status === 403, 'no CSRF token, refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'rm -rf' }, csrf })).status === 400, 'unknown decision refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_mp3' }, csrf })).status === 400, 'decision the album does not allow refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'bin_album' }, csrf })).status === 400, 'Put in the bin only for Library health');
   check((await req('/api/decide', { method: 'POST', body: { id: '1; ls', decision: 'keep_flac' }, csrf })).status === 400, 'non-numeric id refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 7, decision: 'keep_flac' }, csrf })).status === 404, 'album not in queue refused');
-  check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf })).status === 202, 'allowed decision starts a job');
-  check((await req('/api/check', { method: 'POST', body: {}, csrf })).status === 409, 'a second job waits its turn');
-  await new Promise((res) => setTimeout(res, 1500));
-  const calls = fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n');
-  check(calls.length === 1 && calls[0].endsWith('resolve 1 keep_flac'), 'engine ran with id and decision only');
+  r = await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf });
+  check(r.status === 200 && (await r.json()).staged === 1, 'an allowed decision is staged');
+  await new Promise((res) => setTimeout(res, 300));
+  check(!fs.existsSync(path.join(T, 'calls')), 'and the engine is not run');
+  let sg = await stagedNow();
+  check(sg.length === 1 && sg[0].id === 1 && sg[0].decision === 'keep_flac', 'state lists the staged decision');
 
   console.log('releases');
-  await new Promise((res) => setTimeout(res, 1200));
   check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 2 }, csrf })).status === 400, 'a release past the list refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 'rel-a' }, csrf })).status === 400, 'a release given by name refused');
   check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'keep_mp3', release: 1 }, csrf })).status === 400, 'a release only goes with a re-fetch');
-  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf })).status === 202, 'a release by index starts a job');
+  check((await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf })).status === 200, 'a release by index is staged');
+  sg = await stagedNow();
+  check(sg.length === 2 && sg.find((e) => e.id === 2).decision === 'refetch', 'beside the first');
+
+  console.log('watching runs at once');
+  check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'watch_on' }, csrf })).status === 202, 'watch starts a job');
   await new Promise((res) => setTimeout(res, 1500));
-  check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('resolve 2 refetch 1'), 'engine gets it as an integer');
+  check(lastCall().endsWith('resolve 1 watch_on'), 'engine ran with id and decision only');
 
   console.log('block a user');
   check((await req('/api/block', { method: 'POST', body: { id: 1 }, csrf })).status === 400, 'no user to block, refused');
   check((await req('/api/block', { method: 'POST', body: { id: 2, user: 'x' } })).status === 403, 'needs CSRF');
   check((await req('/api/block', { method: 'POST', body: { id: 2, user: 'someone-else' }, csrf })).status === 202, 'blocks by album id');
   await new Promise((res) => setTimeout(res, 1500));
-  check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('block-user 2'), 'the name never reaches the engine from the browser');
+  check(lastCall().endsWith('block-user 2'), 'the name never reaches the engine from the browser');
 
   console.log('several albums');
-  await new Promise((res) => setTimeout(res, 200));
   check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_flac', ids: [1] } })).status === 403, 'no CSRF token, refused');
   check((await req('/api/decide-many', { method: 'POST', body: { decision: 'watch_on', ids: [1] }, csrf })).status === 400, 'only the three decisions');
   check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_mp3', ids: ['1; ls'] }, csrf })).status === 400, 'ids must be integers');
   check((await req('/api/decide-many', { method: 'POST', body: { decision: 'keep_mp3', ids: [1, 99] }, csrf })).status === 400, 'refused when no album allows it');
   r = await req('/api/decide-many', { method: 'POST', body: { decision: 'refetch', ids: [2, 1, 99, 2] }, csrf });
-  check(r.status === 202 && (await r.json()).n === 2, 'albums that allow it start one job');
+  check(r.status === 200 && (await r.json()).staged === 2, 'albums that allow it are staged');
+  sg = await stagedNow();
+  check(sg.length === 2 && sg.every((e) => e.decision === 'refetch' && e.release === null), 'replacing what each had staged, release and all');
+  r = await req('/api/approve-ready', { method: 'POST', body: {}, csrf });
+  check(r.status === 200 && (await stagedNow()).find((e) => e.id === 1).decision === 'keep_flac', 'Approve all ready stages Keep FLAC');
+
+  console.log('unstaging and approving');
+  check((await req('/api/unstage', { method: 'POST', body: { ids: ['2'] }, csrf })).status === 400, 'unstage takes integer ids');
+  check((await req('/api/unstage', { method: 'POST', body: { ids: [2] }, csrf })).status === 200
+    && (await stagedNow()).map((e) => e.id).join() === '1', 'unstaging drops just that album');
+  await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf });
+  check((await req('/api/apply-staged', { method: 'POST', body: { ids: [1] } })).status === 403, 'approving needs CSRF');
+  check((await req('/api/apply-staged', { method: 'POST', body: { ids: [99] }, csrf })).status === 400, 'approving something not staged is refused');
+  check((await req('/api/apply-staged', { method: 'POST', body: { ids: [2, '1; ls'] }, csrf })).status === 400, 'approve takes integer ids');
+  r = await req('/api/apply-staged', { method: 'POST', body: { ids: [2, 1] }, csrf });
+  check(r.status === 202 && (await r.json()).n === 2, 'approving starts one job');
   await new Promise((res) => setTimeout(res, 1500));
-  const many = fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop();
-  check(many.endsWith('resolve-many refetch 2,1'), `engine gets the decision and integer ids (${many})`);
+  check(/apply-staged (1:keep_flac,2:refetch:1|2:refetch:1,1:keep_flac)$/.test(lastCall()), `the engine gets what was staged, from the server (${lastCall()})`);
+  check((await stagedNow()).length === 0, 'and the staged list is empty');
 
   console.log('track tools');
   await new Promise((res) => setTimeout(res, 200));

@@ -8,6 +8,7 @@
     sift.py undo ENTRY                 reverse a decision that is still in the bin
     sift.py empty-bin [DAYS]           delete everything in the bin, or entries older than DAYS - the only delete
     sift.py resolve-many DECISION IDS  keep_flac | keep_mp3 | refetch for ids 1,2,3, one bin entry each
+    sift.py apply-staged SPEC          id:decision[:release],... approved in the app, one bin entry each
     sift.py health MINUTES             check the FLAC library for damaged or converted files, for so long
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
 
@@ -510,6 +511,9 @@ def diagnose(item):
     elif unmatched:
         d = {"kind": "other", "suggest": "refetch",
              "text": f"{len(unmatched)} of {len(mp3)} MP3 tracks don't match: probably a different recording or release."}
+    if d and d["suggest"] == "refetch" and item.get("dupe") and not item.get("lidarr_flac"):
+        # a duplicate Lidarr-FLAC doesn't have can't be searched for: keeping the MP3 is all it can do
+        d["suggest"] = "keep_mp3" if d["kind"] == "missing" else None
     if d and d["suggest"] and d["suggest"] != "pair" and d["suggest"] not in item["allowed"]:
         # a library duplicate can't be re-fetched: when its FLAC is the one missing tracks,
         # the MP3 is the fuller copy
@@ -724,6 +728,46 @@ def find_dupes(taken):
     return found
 
 
+_mp3_titles = None
+
+
+def same_album(mp3_id, title):
+    """Whether the MP3 Lidarr's album `mp3_id` has this title. Unknown counts as yes, as before."""
+    global _mp3_titles
+    if _mp3_titles is None:
+        try:
+            db = sqlite3.connect(CONF["mp3_db"], uri=True)
+            _mp3_titles = {aid: fm.squash(t) for aid, t in db.execute("select Id, Title from Albums")}
+        except Exception as e:
+            log(f"WARNING: MP3 Lidarr albums not read ({e})")
+            _mp3_titles = {}
+    have = _mp3_titles.get(mp3_id)
+    return have is None or have == fm.squash(title)
+
+
+_flac_titles = None
+
+
+def lidarr_flac_album(artist, title):
+    """The Lidarr-FLAC album a library duplicate is, found by name as find_dupes() matches
+    folders: same title, one artist name inside the other. Only a single match counts.
+    None when Lidarr-FLAC doesn't have it (often because MusicBrainz doesn't)."""
+    global _flac_titles
+    if _flac_titles is None:
+        _flac_titles = collections.defaultdict(list)
+        try:
+            db = sqlite3.connect(CONF["flac_db"], uri=True)
+            for aid, t, name, mon in db.execute("""select a.Id, a.Title, am.Name, a.Monitored from Albums a
+                                                   join ArtistMetadata am on am.Id = a.ArtistMetadataId"""):
+                _flac_titles[fm.squash(t)].append((fm.squash(name), aid, bool(mon)))
+        except Exception as e:
+            log(f"WARNING: Lidarr-FLAC albums not read ({e})")
+    want = fm.squash(artist)
+    hits = [(aid, mon) for name, aid, mon in _flac_titles.get(fm.squash(title), [])
+            if want and name and (want in name or name in want)]
+    return {"id": hits[0][0], "monitored": hits[0][1]} if len(hits) == 1 else None
+
+
 def item_from_dupe(d, owners):
     flac_files = fm.folder_audio([d["flac_dir"]])
     mp3_files = fm.folder_audio(d["mp3_dirs"])
@@ -748,21 +792,28 @@ def item_from_dupe(d, owners):
         reasons.append("Every track matches, and every FLAC file decodes cleanly")
     reasons.append("Both copies are in the Roon library already")
     ids = {owners.get(p) for p in mp3_files} - {None}
+    mp3_id = next(iter(ids)) if len(ids) == 1 else None
+    if mp3_id and not same_album(mp3_id, d["title"]):
+        # the MP3 Lidarr files these tracks under an album of another name: unmonitoring that
+        # album on Keep FLAC would change the wrong one
+        mp3_id = None
+    in_flac = lidarr_flac_album(d["artist"], d["title"])
     main, sides = covers(iid, [d["flac_dir"]], flac_files, d["mp3_dirs"], mp3_files)
     item = {
         "id": iid, "artist": d["artist"], "title": d["title"], "queue": "dupes",
         "status": "dupe", "reasons": reasons, "watch": False, "dupe": True,
-        "allowed": (["keep_flac"] if not broken and len(d["mp3_dirs"]) == 1 else []) + ["keep_mp3"],
+        "allowed": (["keep_flac"] if not broken and len(d["mp3_dirs"]) == 1 else []) + ["keep_mp3", "refetch"],
+        "lidarr_flac": {"monitored": in_flac["monitored"]} if in_flac else None,
         "flac": {"tracks": tracks(flac_files, flac=True), "seconds": flac_s,
                  "details": details(None, None, flac_files)},
         "mp3": {"tracks": tracks(mp3_files), "seconds": mp3_s,
-                "details": details("mp3", next(iter(ids)) if len(ids) == 1 else None, mp3_files)},
+                "details": details("mp3", mp3_id, mp3_files)},
         "pairs": [{k: t[k] for k in ("m", "f", "sim", "same")} for t in pairs],
         "foreign": False, "reorder": False,
         "_status": "dupe", "_reasons": list(reasons),
         "cover": main, "covers": sides,
         "_do": {"kind": "dupe", "flac_dir": d["flac_dir"], "mp3_dirs": d["mp3_dirs"],
-                "mp3_id": next(iter(ids)) if len(ids) == 1 else None, "hold": None, "foreign_ids": []},
+                "mp3_id": mp3_id, "flac_album": in_flac and in_flac["id"], "hold": None, "foreign_ids": []},
         "_files": {"flac": flac_files, "mp3": mp3_files},
     }
     return suspect(item)
@@ -1386,8 +1437,17 @@ def dupe_keep_mp3(item, en):
     en.to_bin(item["_do"]["flac_dir"])
 
 
+def dupe_refetch(item, en):
+    """Keep the MP3 and bin the FLAC, then have Soularr look for a better one: monitored in
+    Lidarr-FLAC when Lidarr-FLAC has the album. When it doesn't, this is Keep MP3."""
+    en.to_bin(item["_do"]["flac_dir"])
+    if item["_do"].get("flac_album"):
+        en.monitor("flac", item["_do"]["flac_album"], True)
+
+
 DECISIONS = {"keep_flac": keep_flac, "keep_mp3": keep_mp3, "refetch": refetch}
-DUPE_DECISIONS = {"keep_flac": dupe_keep_flac, "keep_mp3": dupe_keep_mp3}
+STAGEABLE = {"keep_flac", "keep_mp3", "refetch", "bin_album"}
+DUPE_DECISIONS = {"keep_flac": dupe_keep_flac, "keep_mp3": dupe_keep_mp3, "refetch": dupe_refetch}
 
 
 # ---- track tools ---------------------------------------------------------------
@@ -1657,6 +1717,37 @@ def resolve_many(decision, ids, only_queue=None):
     return done, items
 
 
+def apply_staged(spec):
+    """Decisions staged in the app and then approved, each (album id, decision, release
+    index or None). Each gets its own bin entry, as one at a time would; an album that
+    fails is rolled back and skipped, and the rest go ahead."""
+    with Lock():
+        by_id = {i["id"]: i for i in fm.load_json(QUEUE, {}).get("items", [])}
+        done = set()
+        for album_id, decision, release in spec:
+            i = by_id.get(album_id)
+            label = f"{i['artist']} — {i['title']}" if i else f"album {album_id}"
+            try:
+                if not i:
+                    raise RuntimeError("no longer in the queue")
+                if release is not None:
+                    options = i.get("releases") or []
+                    if decision != "refetch" or not 0 <= release < len(options):
+                        raise RuntimeError("no such release for this album")
+                    i["_release"] = options[release]["release"]
+                decide(i, decision)
+                done.add(album_id)
+                print(f"done    {decision}: {label}", flush=True)
+            except Exception as e:
+                print(f"skipped {label}: {e}", flush=True)
+                remember("failed", {"at": now(), "decision": decision, "album_id": album_id,
+                                    "label": label, "error": str(e)[:300]})
+        rescan("flac"), rescan("mp3")
+        refresh_queue(done)
+    log(f"apply-staged: {len(done)} of {len(spec)} done")
+    return done
+
+
 def approve_ready():
     done, ready = resolve_many("keep_flac", (), only_queue="ready")
     log(f"approve-ready: {len(done)} of {len(ready)} moved into the FLAC library")
@@ -1793,6 +1884,16 @@ def main():
             log(f"{a[1]} for {len(done)} of {len(items)} albums")
         elif len(a) == 2 and a[0] == "health" and a[1].isdigit():
             health(int(a[1]))
+        elif len(a) == 2 and a[0] == "apply-staged" \
+                and re.fullmatch(r"\d+:[a-z0-9_]+(:\d+)?(,\d+:[a-z0-9_]+(:\d+)?)*", a[1]):
+            spec = []
+            for part in a[1].split(","):
+                bits = part.split(":")
+                if bits[1] not in STAGEABLE:
+                    sys.exit(f"{bits[1]} can't be staged")
+                spec.append((int(bits[0]), bits[1], int(bits[2]) if len(bits) == 3 else None))
+            if not apply_staged(spec):
+                sys.exit("nothing was done")
         elif a == ["approve-ready"]:
             approve_ready()
         elif len(a) == 2 and a[0] == "undo":
