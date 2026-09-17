@@ -101,7 +101,10 @@ from the four music folders (symlinks resolved first).
 Nothing moves unless both drives it touches are mounted: an unmounted drive's mount point is
 an ordinary folder on the root disk. Library health measures one album at a time under the
 same lock as decisions, so it never has files open that a decision is moving. Wrong passwords,
-at sign-in or when emptying the bin, share one lockout: 10 in 5 minutes.
+at sign-in or when emptying the bin, share one lockout: 10 in 5 minutes. **Sign out** ends
+every session, on every device. Engine output shown in the page has its paths replaced with
+`…`; the full text is in `audit.log`. Requests for any host name other than Sift's own
+addresses are refused.
 
 ## Shell
 

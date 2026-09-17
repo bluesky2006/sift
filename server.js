@@ -102,8 +102,17 @@ async function readState(name, fallback) {
   } catch { return fallback; }
 }
 
-// Keys starting with _ hold paths; they never leave the server.
-const pub = (item) => Object.fromEntries(Object.entries(item).filter(([k]) => !k.startsWith('_')));
+// Keys starting with _ hold paths; they never leave the server, at any depth.
+const pub = (v) => Array.isArray(v) ? v.map(pub)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).filter(([k]) => !k.startsWith('_')).map(([k, x]) => [k, pub(x)]))
+  : v;
+
+// Engine output quotes the paths it failed on. Those stay in audit.log; the browser gets
+// "…" in their place, quoted or not.
+const scrub = (text) => String(text || '')
+  .replace(/(['"])[^'"\n]*\/[^'"\n]*\1/g, '$1…$1')
+  .replace(/(^|[\s(=])\/[^\n;()]*?(?=: |:$|,? \(|;|\)|\n|$)/gm, '$1…');
+const jobView = (j) => j && { kind: j.kind, label: j.label, done: j.done, ok: j.ok, output: scrub(j.output) };
 
 // ---- jobs ------------------------------------------------------------------
 // One engine run at a time from the app. The scheduled check takes the engine's own
@@ -230,7 +239,7 @@ async function history() {
   }
   // errors quote the paths they failed on; those stay here
   for (const e of events) {
-    if (e.error) e.error = e.error.trim().split('\n').pop().replace(/(^|[\s(])\/[^:\n]*/g, '$1…').slice(0, 300);
+    if (e.error) e.error = scrub(e.error.trim().split('\n').pop()).slice(0, 300);
   }
   events.sort((x, y) => new Date(y.at) - new Date(x.at));
   const totals = { flac: 0, mp3: 0, refetch: 0, freed: 0, emptied: (h.emptied || []).length };
@@ -243,7 +252,11 @@ async function history() {
 
 // ---- routes ----------------------------------------------------------------
 
+// Only our own addresses, so a page on another name that rebinds to us gets nowhere
+const HOST_OK = new Set(HOSTS.flatMap((h) => [`${h}:${PORT}`]).concat(`localhost:${PORT}`));
+
 async function handle(req, res) {
+  if (!HOST_OK.has(String(req.headers.host || '').toLowerCase())) return send(res, 421, 'wrong host');
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
   const a = await auth.loadAuth();
@@ -278,6 +291,8 @@ async function handle(req, res) {
     return json(res, 200, { ok: true }, { 'Set-Cookie': cookie(auth.makeSession(a)) });
   }
   if (p === '/api/auth/logout' && req.method === 'POST') {
+    // ends every session, this one and any other device's
+    if (authed) { await auth.endSessions(a); audit({ event: 'logout', ip: req.socket.remoteAddress }); }
     return json(res, 200, { ok: true }, { 'Set-Cookie': `${auth.COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
   }
 
@@ -301,7 +316,7 @@ async function handle(req, res) {
       built: q.built, checked: q.checked, previous_check: q.previous_check, items,
       bin: b.entries.map((e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 }))
         .reverse(),
-      job: job && { kind: job.kind, label: job.label, done: job.done, ok: job.ok, output: job.output },
+      job: jobView(job),
       settings: await readState('settings.json', {}),
     });
   }
@@ -341,7 +356,7 @@ async function handle(req, res) {
   if (p === '/api/history' && req.method === 'GET') return json(res, 200, await history());
 
   if (p === '/api/job' && req.method === 'GET') {
-    return json(res, 200, { job: job && { kind: job.kind, label: job.label, done: job.done, ok: job.ok, output: job.output } });
+    return json(res, 200, { job: jobView(job) });
   }
 
   // ---- changes: CSRF on every one

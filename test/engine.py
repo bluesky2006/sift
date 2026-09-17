@@ -166,6 +166,8 @@ sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
 calls = [json.loads(l) for l in open(API)]
 check(any(c[1] == "PUT" and c[2] == "/album/1" and [x["monitored"] for x in c[3]["releases"]] == [True, False] for c in calls),
       "undo selects the old release again")
+check(any(c[1] == "PUT" and c[2] == "/album/1" and c[3]["anyReleaseOk"] is True for c in calls),
+      "and turns any-release-OK back on")
 
 print("refusals")
 write_queue()
@@ -352,6 +354,14 @@ check(dg["diagnosis"]["kind"] == "edits" and "+60 s" in dg["diagnosis"]["text"],
 dg = S.apply_overrides(diag_item([100, 200, 300, 400], [100, 200, 300, 401], [P(0, 0), P(1, 1), P(2, 2), P(3, None, False)],
                                  queue="different", status="unconfirmed"), None)
 check(dg["diagnosis"]["kind"] == "pair" and dg["diagnosis"]["suggest"] == "pair", "an unmatched track with a same-length spare suggests pairing")
+dupe = diag_item([100, 200, 300], [100], [P(0, 0), P(1, None, False), P(2, None, False)], queue="dupes", status="dupe")
+dupe["allowed"] = ["keep_flac", "keep_mp3"]
+dg = S.apply_overrides(dupe, None)
+check(dg["diagnosis"]["kind"] == "missing" and dg["diagnosis"]["suggest"] == "keep_mp3",
+      "a duplicate whose FLAC is missing tracks suggests keeping the MP3, not a re-fetch it can't have")
+other = diag_item([100, 200], [150, 250], [P(0, None, False), P(1, None, False)], queue="dupes", status="dupe")
+other["allowed"] = ["keep_flac", "keep_mp3"]
+check(S.apply_overrides(other, None)["diagnosis"]["suggest"] is None, "and suggests nothing when it can't take the suggestion")
 
 print("shared MP3 folder, Keep FLAC")
 tone(f"{DATA}/music-flac/Shared2/Alb/01.flac", "flac")
@@ -384,6 +394,14 @@ src = S.add_sources([{"id": 1, "artist": "Zed", "title": "Blue", "queue": "suspe
                      {"id": 2, "artist": "Quill", "title": "Green", "queue": "ready", "flac": {"tracks": []}}])
 check(src[0]["source"] == {"user": "baduser", "albums": 1, "bad": 1, "blocked": False}, "a finished download names its user, not a cancelled one")
 check(src[1]["source"]["user"] == "gooduser", "found by the artist folder above the album too")
+sq, w = S.fm.squash, S.words
+remix = "Perel - Matrix (Sofia Kourtesis Remix)"
+check(not S.source_match(sq("Sofia Kourtesis"), sq("Sofia Kourtesis"), sq(remix), w(remix), w("Sofia Kourtesis"))
+      and S.source_match(sq("Sofia Kourtesis"), sq("Sofia Kourtesis"), sq("Sofia Kourtesis - Sofia Kourtesis (BARN058) FLAC"), w(""), w("Sofia Kourtesis")),
+      "a self-titled album needs the name twice, so a remix folder isn't its source")
+check(not S.source_match(sq("Angel 1"), sq("Fy"), sq("Angel 1 Fyodor Live"), w("Fyodor Live"), w("Fy"))
+      and S.source_match(sq("Angel 1"), sq("Fy"), sq("Angel 1 - Fy [FLAC]"), w("Angel 1 - Fy [FLAC]"), w("Fy")),
+      "a short title must be a whole word in the folder's name")
 json.dump(conf, open(f"{T}/conf.json", "w"))
 json.dump({**conf, "soularr_config": cfg}, open(f"{T}/conf.json", "w"))
 json.dump({"items": [{"id": 1, "artist": "Zed", "title": "Blue", "queue": "suspect", "source": src[0]["source"], "_do": {}}]},
@@ -651,6 +669,44 @@ except OSError:
     pass
 os.rename = real_rename
 check(len(calls) >= 3 and sorted(os.listdir(d)) == ["01.flac", "02.flac"], "a rename that fails partway puts the others back")
+
+print("blocked from two albums")
+cfg2 = f"{T}/soularr2.ini"
+open(cfg2, "w").write("[Search Settings]\nignored_users = \n")
+json.dump({**conf, "soularr_config": cfg2}, open(f"{T}/conf.json", "w"))
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+for n in (1, 2):
+    json.dump({"items": [{"id": n, "artist": "Zed", "title": f"T{n}", "queue": "suspect", "_do": {},
+                          "source": {"user": "twice"}}]}, open(f"{STATE}/queue.json", "w"))
+    sift("block-user", str(n))
+e1, e2 = load(f"{STATE}/bin.json")["entries"]
+sift("undo", e1["id"])
+check("twice" in open(cfg2).read(), "undoing one block leaves the user blocked while the other still stands")
+sift("undo", e2["id"])
+check("twice" not in open(cfg2).read(), "and undoing the other unblocks them")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+
+print("emptying that fails partway")
+os.makedirs(f"{MUSIC}/Sift-bin/aaa/X", exist_ok=True); open(f"{MUSIC}/Sift-bin/aaa/X/f", "w").write("x")
+os.makedirs(f"{MUSIC}/Sift-bin/bbb/Y", exist_ok=True); open(f"{MUSIC}/Sift-bin/bbb/Y/f", "w").write("x")
+os.symlink(f"{T}/precious", f"{MUSIC}/Sift-bin/ccc"); os.makedirs(f"{T}/precious", exist_ok=True); open(f"{T}/precious/keep", "w").write("x")
+json.dump({"entries": [{"id": i, "at": "2026-01-01T00:00:00", "decision": "keep_flac", "label": i, "bytes": 1, "ops": []}
+                       for i in ("aaa", "bbb", "ccc")]}, open(f"{STATE}/bin.json", "w"))
+os.chmod(f"{MUSIC}/Sift-bin/bbb/Y", 0o555)                               # its file can't be deleted
+r = sift("empty-bin", ok=False)
+os.chmod(f"{MUSIC}/Sift-bin/bbb/Y", 0o755)
+check(r.returncode != 0 and [e["id"] for e in load(f"{STATE}/bin.json")["entries"]] == ["bbb", "ccc"]
+      and not os.path.exists(f"{MUSIC}/Sift-bin/aaa"), "a failed delete stops there, and bin.json lists exactly what is left")
+r = sift("empty-bin")
+check(r.returncode == 0 and os.path.isfile(f"{T}/precious/keep") and not os.path.lexists(f"{MUSIC}/Sift-bin/ccc"),
+      "a symlink in the bin is removed, never followed")
+
+print("covers")
+from PIL import Image
+big = f"{T}/big.jpg"
+Image.new("RGB", (3000, 3000), "red").save(big)
+S.shrink(big)
+check(max(Image.open(big).size) == S.COVER_PX, "a big cover is shrunk to phone size")
 
 print("health keeps a dismissal made while it runs")
 json.dump({"albums": {}, "dismissed": {"/x": [1, 2, 3]}}, open(S.HEALTH, "w"))

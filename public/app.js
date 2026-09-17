@@ -489,7 +489,8 @@ async function renderAlbum(id, keepMode = false) {
   const qname = (QUEUES.find((q) => q[0] === a.queue) || [])[1] || a.queue;
   const texts = a.dupe ? DUPE_TEXT : DECISION_TEXT;
   const diag = a.diagnosis;
-  const primary = diag && diag.suggest && a.allowed.includes(diag.suggest) ? diag.suggest : 'keep_flac';
+  // with a diagnosis, only its suggestion is highlighted, or nothing when it says listen first
+  const primary = diag ? (a.allowed.includes(diag.suggest) ? diag.suggest : null) : 'keep_flac';
   const buttons = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album', 'dismiss'].filter((d) => a.allowed.includes(d))
     .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
   const near = neighbours(a);

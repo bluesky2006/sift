@@ -122,7 +122,7 @@ def lidarr(inst, path, method="GET", body=None):
         with open(os.environ["SIFT_FAKE_API"], "a") as f:
             f.write(json.dumps([inst, method, path, body]) + "\n")
         if method == "GET":
-            return {"monitored": True, "releases": [{"foreignReleaseId": "rel-a", "monitored": True},
+            return {"monitored": True, "anyReleaseOk": True, "releases": [{"foreignReleaseId": "rel-a", "monitored": True},
                                                     {"foreignReleaseId": "rel-b", "monitored": False}]}
         return {}
     req = urllib.request.Request(
@@ -143,6 +143,24 @@ def rescan(inst):
 
 # ---- queue ---------------------------------------------------------------------
 
+COVER_PX = 600
+
+
+def shrink(path):
+    """Covers can be 15 MB scans; the page never shows one wider than a phone."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            if max(im.size) <= COVER_PX and im.format == "JPEG":
+                return
+            im = im.convert("RGB")
+            im.thumbnail((COVER_PX, COVER_PX))
+            im.save(path + ".tmp", "JPEG", quality=85)
+        os.replace(path + ".tmp", path)
+    except Exception:
+        pass                                      # an odd picture is served as it is
+
+
 def cover(item_id, side, folders, files):
     """Save one picture for this side of the album, from a folder image or embedded art."""
     os.makedirs(COVERS, exist_ok=True)
@@ -158,6 +176,7 @@ def cover(item_id, side, folders, files):
         pics.sort(key=lambda n: (not n.lower().startswith(("cover", "folder", "front")), n))
         if pics:
             shutil.copyfile(os.path.join(d, pics[0]), out)
+            shrink(out)
             return True
     for p in files[:3]:
         try:
@@ -171,6 +190,7 @@ def cover(item_id, side, folders, files):
             if data:
                 with open(out, "wb") as f:
                     f.write(data)
+                shrink(out)
                 return True
         except Exception:
             continue
@@ -490,6 +510,10 @@ def diagnose(item):
     elif unmatched:
         d = {"kind": "other", "suggest": "refetch",
              "text": f"{len(unmatched)} of {len(mp3)} MP3 tracks don't match: probably a different recording or release."}
+    if d and d["suggest"] and d["suggest"] != "pair" and d["suggest"] not in item["allowed"]:
+        # a library duplicate can't be re-fetched: when its FLAC is the one missing tracks,
+        # the MP3 is the fuller copy
+        d["suggest"] = "keep_mp3" if d["kind"] == "missing" and "keep_mp3" in item["allowed"] else None
     item["diagnosis"] = d
     return item
 
@@ -551,7 +575,7 @@ def downloads():
     for user, name, ended in rows:
         # the album folder and the one above it, which often holds the artist's name
         parts = name.replace("\\", "/").split("/")[:-1]
-        out.append((fm.squash(" ".join(parts[-2:])), user, ended or ""))
+        out.append((fm.squash(" ".join(parts[-2:])), words(parts[-1] if parts else ""), user, ended or ""))
     return out
 
 
@@ -566,6 +590,25 @@ def ignored_users():
     return []
 
 
+def words(name):
+    """Lower-case words, space-separated and padded, for whole-word matching."""
+    return " " + " ".join(re.findall(r"[a-z0-9]+", name.lower())) + " "
+
+
+def source_match(artist, title, folder, album, title_words):
+    """Does a downloaded folder (with the one above it) hold this album? `artist`, `title`
+    and `folder` are squashed; `album` and `title_words` are words()."""
+    if title not in folder or artist not in folder:
+        return False
+    if artist == title:
+        # self-titled: the name once is any folder with the artist in it, a remix say
+        return folder.count(artist) >= 2
+    if len(title) <= 4:
+        # a short title like "Fy" or "1991" turns up inside other words
+        return title_words in album
+    return True
+
+
 def add_sources(items):
     """Name the user each album came from, and how their other albums in the queue fared."""
     dl = downloads()
@@ -577,7 +620,7 @@ def add_sources(items):
         artist, title = fm.squash(i["artist"]), fm.squash(i["title"])
         if not artist or not title:
             continue
-        found = sorted((when, user) for folder, user, when in dl if title in folder and artist in folder)
+        found = sorted((when, user) for folder, album, user, when in dl if source_match(artist, title, folder, album, words(i["title"])))
         if found:
             i["source"] = {"user": found[-1][1]}
     by_user = collections.defaultdict(list)
@@ -617,8 +660,15 @@ def set_ignored(change):
     tmp = path + ".sift-tmp"
     with open(tmp, "w") as f:
         f.write("\n".join(lines))
+        f.flush()
+        os.fsync(f.fileno())                      # a power cut must not leave Soularr an empty config
     shutil.copymode(path, tmp)
     os.replace(tmp, path)
+    d = os.open(os.path.dirname(path), os.O_RDONLY)
+    try:
+        os.fsync(d)
+    finally:
+        os.close(d)
 
 
 # ---- library duplicates --------------------------------------------------------
@@ -982,7 +1032,7 @@ def require_mounted(m):
     """An unmounted drive leaves its mount point as a plain folder on the root disk:
     moving into it fills root, and the files hide once the drive comes back."""
     if CONF.get("check_mounts", True) and not os.path.ismount(m):
-        raise RuntimeError(f"refusing: {m} is not mounted")
+        raise RuntimeError(f"refusing: the {os.path.basename(m)} drive is not mounted")
 
 
 def bin_dir(entry_id, path):
@@ -1103,8 +1153,9 @@ class Entry:
         if not any(r["foreignReleaseId"] == mbid for r in rels):
             raise RuntimeError("Lidarr-FLAC doesn't list that release for this album")
         before = next((r["foreignReleaseId"] for r in rels if r.get("monitored")), None)
+        any_ok = album.get("anyReleaseOk", False)
         set_release(album_id, mbid, album)
-        self.d["ops"].append({"op": "release", "album": album_id, "before": before})
+        self.d["ops"].append({"op": "release", "album": album_id, "before": before, "any_ok": any_ok})
         self.journal()
 
     def ignore_user(self, user):
@@ -1131,11 +1182,13 @@ class Entry:
         fm.save_json(path, data)
 
 
-def set_release(album_id, mbid, album=None):
+def set_release(album_id, mbid, album=None, any_ok=False):
+    """Select `mbid` (None leaves the releases as they are) and set anyReleaseOk."""
     album = album or lidarr("flac", f"/album/{album_id}")
-    for r in album.get("releases", []):
-        r["monitored"] = r["foreignReleaseId"] == mbid
-    album["anyReleaseOk"] = False
+    if mbid:
+        for r in album.get("releases", []):
+            r["monitored"] = r["foreignReleaseId"] == mbid
+    album["anyReleaseOk"] = any_ok
     lidarr("flac", f"/album/{album_id}", "PUT", album)
 
 
@@ -1157,8 +1210,7 @@ def undo_ops(ops):
                 if o["added"]:
                     set_ignored(lambda users: [u for u in users if u != o["user"]])
             elif o["op"] == "release":
-                if o["before"]:
-                    set_release(o["album"], o["before"])
+                set_release(o["album"], o["before"], any_ok=o.get("any_ok", False))
             elif o["op"] == "retag":
                 retag(o["dir"], [{"from": c["to"], "to": c["from"], "tag": c["tag_before"]}
                                  for c in o["changes"]])
@@ -1630,6 +1682,13 @@ def undo(entry_id):
         problems = undo_problems(entry, b["entries"])
         if problems:
             raise SystemExit("can't undo, nothing changed: " + "; ".join(problems[:3]))
+        for o in entry["ops"]:
+            # another entry still blocks this user: leave them blocked, and that entry's
+            # undo becomes the one that unblocks
+            other = next((x for e in b["entries"] if e is not entry for x in e["ops"]
+                          if x["op"] == "ignore_user" and x["user"] == o.get("user")), None)
+            if o["op"] == "ignore_user" and o["added"] and other:
+                o["added"], other["added"] = False, True
         errors = undo_ops(entry["ops"])
         if errors:
             log(f"undo {entry['label']} incomplete: {errors}")
@@ -1665,21 +1724,46 @@ def older_than(entries, days):
 
 
 def empty_bin(days=None):
-    """Delete everything in the bin, or with `days` only the entries older than that."""
+    """Delete everything in the bin, or with `days` only the entries older than that. One
+    entry at a time, saving bin.json after each, so a delete that fails partway never leaves
+    an entry listed whose files are gone."""
     with Lock():
         b = fm.load_json(BIN, {"entries": []})
         gone = b["entries"] if days is None else older_than(b["entries"], days)
         roots = bin_roots()
-        ids = {e["id"] for e in gone}
-        for real in roots:
-            for name in os.listdir(real):
-                if days is None or name in ids:
-                    shutil.rmtree(os.path.join(real, name))
-        freed = sum(e.get("bytes", 0) for e in gone)
-        if gone:
-            remember("emptied", {"at": now(), "bytes": freed, "entries": [summary(e) for e in gone]})
-        fm.save_json(BIN, {"entries": [e for e in b["entries"] if e["id"] not in ids]})
-    log(f"emptied bin{f' (older than {days} days)' if days else ''}: {len(gone)} entries, {freed / 1e9:.1f} GB")
+        emptied, error = [], None
+        for e in gone:
+            try:
+                for real in roots:
+                    remove_tree(os.path.join(real, e["id"]))
+            except OSError as err:
+                error = f"{e['label']}: {err}"
+                break
+            emptied.append(e)
+            b["entries"] = [x for x in b["entries"] if x["id"] != e["id"]]
+            fm.save_json(BIN, b)
+        if days is None and not error:
+            # leftovers no entry names, e.g. from before bin.json existed
+            for real in roots:
+                for name in os.listdir(real):
+                    remove_tree(os.path.join(real, name))
+        freed = sum(e.get("bytes", 0) for e in emptied)
+        if emptied:
+            remember("emptied", {"at": now(), "bytes": freed, "entries": [summary(e) for e in emptied]})
+    log(f"emptied bin{f' (older than {days} days)' if days else ''}: {len(emptied)} entries, {freed / 1e9:.1f} GB"
+        + (f"; stopped at {error}" if error else ""))
+    if error:
+        raise RuntimeError(f"emptying stopped at {error}")
+
+
+def remove_tree(path):
+    """A symlink in the bin is only ever unlinked, never followed."""
+    if os.path.islink(path):
+        os.unlink(path)
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    elif os.path.exists(path):
+        os.remove(path)
 
 
 def adopt(path, label):

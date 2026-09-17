@@ -1,5 +1,6 @@
 // Server tests: auth, CSRF, what reaches the browser, audio confinement, and that the
 // engine is only ever run with an id and a known decision. The engine is a stub here.
+import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -20,13 +21,13 @@ execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:
 
 // the engine stub records its argv, and runs for a moment so a second job can collide
 const stub = path.join(T, 'engine.sh');
-fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${T}/calls\nsleep 1\n`, { mode: 0o755 });
+fs.writeFileSync(stub, `#!/bin/sh\necho "$@" >> ${T}/calls\necho "can't: '/secret/job/a b.flac' missing: /secret/job/x" >&2\nsleep 1\n`, { mode: 0o755 });
 
 fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
   checked: new Date().toISOString(),
   items: [{
     id: 1, artist: 'Art', title: 'Alb', queue: 'ready', reasons: ['r'], allowed: ['keep_flac', 'refetch', 'watch'], reorder: true,
-    flac: { tracks: [{ name: '01.flac', secs: 3, fmt: '16-bit / 44.1 kHz' }, { name: 'x' }, { name: 'link' }] },
+    flac: { tracks: [{ name: '01.flac', secs: 3, fmt: '16-bit / 44.1 kHz', _path: '/secret/nested' }, { name: 'x' }, { name: 'link' }] },
     mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/dir' },
     _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd', path.join(MUSIC, 'Art/Alb/link.flac')], mp3: [] },
@@ -43,7 +44,7 @@ fs.writeFileSync(path.join(STATE, 'history.json'), JSON.stringify({
   emptied: [{ at: '2026-09-12T10:00:00', bytes: 5e9, entries: [{ id: 'e1', at: '2026-09-09T10:00:00', decision: 'keep_mp3', label: 'Gone — Album', bytes: 5e9 }] }],
   undone: [{ id: 'u1', at: '2026-09-08T10:00:00', decision: 'keep_flac', label: 'Undone — Album', undone: '2026-09-08T11:00:00' }],
 }));
-fs.writeFileSync(path.join(STATE, 'audit.log'), JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', label: 'Broke — Album', ok: false, output: 'rsync /secret/music/Broke/Album: (2 left)\n' }) + '\n');
+fs.writeFileSync(path.join(STATE, 'audit.log'), JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', label: 'Broke — Album', ok: false, output: "rsync '/secret/music/Broke/Album': (2 left)\n" }) + '\n');
 
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
@@ -91,6 +92,10 @@ try {
   const al = await (await req('/api/album/1')).text();
   check(!st.includes('_do') && !st.includes('_files') && !st.includes(MUSIC), 'state carries no paths');
   check(!al.includes('_do') && !al.includes('_files') && !al.includes('/secret/dir'), 'album carries no paths');
+  check(!al.includes('_path') && !al.includes('/secret/nested'), 'nor any nested _ key');
+  const wrongHost = await new Promise((ok) => http.get({ host: '127.0.0.1', port: PORT, path: '/api/auth/status', headers: { Host: 'evil.example' } },
+    (r) => { r.resume(); ok(r.statusCode); }));
+  check(wrongHost === 421, 'a request for another host name is refused');
   const stj = JSON.parse(st);
   check(stj.items[1].suspect.hz === 16000 && stj.items[1].allowed.includes('keep_mp3'), 'state carries the suspect flag and allowed decisions');
 
@@ -101,7 +106,7 @@ try {
     `history joins the bin, what left it and failed jobs (${outcomes.join(', ')})`);
   check(hist.totals.flac === 1 && hist.totals.mp3 === 1 && hist.totals.freed === 5e9, 'totals count the bin and emptied, not undone');
   check(!JSON.stringify(hist).includes('/secret'), 'history carries no paths');
-  check(hist.events.find((e) => e.outcome === 'failed').error === 'rsync …: (2 left)', 'a failed job says why, without the path');
+  check(hist.events.find((e) => e.outcome === 'failed').error === "rsync '…': (2 left)", 'a failed job says why, without the path');
 
   console.log('spectrograms');
   let sp = await req('/api/spectrum/2/flac/0');
@@ -185,12 +190,25 @@ try {
   await new Promise((res) => setTimeout(res, 1500));
   check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('empty-bin 30'), 'with the days from the setting, not the browser');
 
+  console.log('engine output');
+  const jobText = JSON.stringify(await (await req('/api/job')).json()) + JSON.stringify(await (await req('/api/history')).json());
+  check(jobText.includes("can't") && !jobText.includes('/secret'), 'paths in job output and history are hidden, quoted or not');
+
+  console.log('sign out');
+  const old = jar;
+  await req('/api/auth/logout', { method: 'POST', csrf });
+  jar = old;
+  check((await req('/api/state')).status === 401, 'signing out ends the session, even if its cookie is kept');
+  check((await req('/api/auth/login', { method: 'POST', body: { password: 'a-long-test-password' } })).status === 200
+    && (await req('/api/state')).status === 200, 'and signing in again works');
+  const csrf2 = (await (await req('/api/csrf')).json()).csrf;
+
   console.log('lockout');
   const burst = await Promise.all(Array.from({ length: 30 }, () =>
     req('/api/auth/login', { method: 'POST', body: { password: 'wrong-password-here' } })));
   check(burst.filter((r) => r.status === 401).length <= 10 && burst.some((r) => r.status === 429),
     'guesses sent all at once still stop at the limit');
-  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'wrong-password-here' }, csrf })).status === 429,
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'wrong-password-here' }, csrf: csrf2 })).status === 429,
     'and the password re-ask for emptying shares the lockout');
 
 } finally {
