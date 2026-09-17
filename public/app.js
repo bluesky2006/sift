@@ -134,6 +134,8 @@ async function watchJob() {
       if (job.done) {
         $('jobspin').hidden = true;
         await loadState();
+        if (job.ok && afterJob) { const go = afterJob; afterJob = null; location.hash = go; }
+        if (!job.ok) afterJob = null;
         if (job.ok) {
           setTimeout(() => { bar.hidden = true; }, 2500);
           const note = { keep_flac: 'Moved into the FLAC library. Undo is in the bin.',
@@ -165,7 +167,7 @@ async function run(path, body) {
   try {
     await api(path, body);
     watchJob();
-  } catch (e) { toast(e.message); }
+  } catch (e) { afterJob = null; toast(e.message); }
 }
 
 // ---- the queues --------------------------------------------------------------
@@ -188,7 +190,7 @@ function row(i) {
   if (i.suspect) badges.push(`<span class="badge bad">FLAC stops at ${khz(i.suspect.hz)}</span>`);
   const inner = `${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
     <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
-    <span class="rreason">${esc((i.reasons || [])[0] || '')}</span>
+    <span class="rreason">${esc((i.diagnosis && i.diagnosis.text) || (i.reasons || [])[0] || '')}</span>
     <span class="badges">${badges.join('')}</span></span>`;
   if (selecting) {
     return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
@@ -287,6 +289,14 @@ $('selcancel').onclick = () => { selecting = false; selected.clear(); renderList
 
 // ---- an album ----------------------------------------------------------------
 
+// the albums around this one in its queue, in the list's order and search
+function neighbours(a) {
+  const list = state.items.filter((i) => i.queue === a.queue && matches(i)).sort(SORTS[sortBy][1]);
+  const k = list.findIndex((i) => i.id === a.id);
+  return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null };
+}
+let afterJob = null;          // where to go once the decision in progress succeeds
+
 function buildRows(a) {
   const flac = a.flac ? a.flac.tracks : [];
   const mp3 = a.mp3 ? a.mp3.tracks : [];
@@ -348,7 +358,7 @@ function toolbar(a) {
   }
   const b = [];
   if (a.flac && a.flac.tracks.length) b.push('<button id="tspectra">Spectrograms</button>');
-  if (hasBoth) b.push('<button id="tpair">Pair tracks by hand</button>');
+  if (hasBoth) b.push(`<button id="tpair" class="${a.diagnosis && a.diagnosis.suggest === 'pair' ? 'primary' : ''}">Pair tracks by hand</button>`);
   if (a.flac && a.flac.tracks.length && a.reorder) b.push(`<button id="torder">Edit FLAC tracks</button>`);
   if (a.foreign || a.one_album) {
     b.push(`<button id="tone">${a.one_album ? 'Undo "folder is all one album"' : 'This folder is all one album'}</button>`);
@@ -466,9 +476,12 @@ async function renderAlbum(id, keepMode = false) {
   document.title = `${a.artist} — ${a.title} · Sift`;
   const qname = (QUEUES.find((q) => q[0] === a.queue) || [])[1] || a.queue;
   const texts = a.dupe ? DUPE_TEXT : DECISION_TEXT;
+  const diag = a.diagnosis;
+  const primary = diag && diag.suggest && a.allowed.includes(diag.suggest) ? diag.suggest : 'keep_flac';
   const buttons = ['keep_flac', 'keep_mp3', 'refetch'].filter((d) => a.allowed.includes(d))
-    .map((d) => `<button class="${d === 'keep_flac' ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}</button>`);
-  if (a.allowed.length) buttons.push('<a class="button ghost" href="#/">Later</a>');
+    .map((d) => `<button class="${d === primary ? 'primary' : ''}" data-decide="${d}">${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
+  const near = neighbours(a);
+  if (a.allowed.length) buttons.push(`<a class="button ghost" id="later" href="${near.next ? `#/album/${near.next.id}` : '#/'}">${near.next ? 'Next album' : 'Later'}</a>`);
   const watch = a.allowed.includes('watch')
     ? `<label class="switch"><input type="checkbox" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
   const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : 'No MP3',
@@ -480,6 +493,7 @@ async function renderAlbum(id, keepMode = false) {
       <div><p class="qname">${esc(qname)}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
       <p class="totals">${esc(totals)}</p></div>
     </div>
+    ${diag ? `<p class="diag">${esc(diag.text)}</p>` : ''}
     <ul class="reasons">${a.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
     ${mode === 'view' ? releaseFacts(a) : ''}
     <div class="decisions">${mode === 'view' ? buttons.join('') : ''}</div>
@@ -493,6 +507,8 @@ async function renderAlbum(id, keepMode = false) {
     b.onclick = async () => {
       const [title, body] = texts[b.dataset.decide];
       if (await ask({ title: `${title}?`, body, ok: title })) {
+        const n = neighbours(a).next || neighbours(a).prev;
+        afterJob = n ? `#/album/${n.id}` : '#/';
         run('/api/decide', { id: a.id, decision: b.dataset.decide });
       }
     };
@@ -855,6 +871,13 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     keyRows(ev.key === 'ArrowDown' ? 1 : -1);
   } else if (ev.key === 'Escape' && onAlbum && mode !== 'view') { mode = 'view'; picked = null; renderAlbum(album.id, true); }
+  else if ((ev.key === 'j' || ev.key === 'k') && onAlbum) {
+    const n = neighbours(album)[ev.key === 'j' ? 'next' : 'prev'];
+    if (n) location.hash = `#/album/${n.id}`;
+  } else if (['1', '2', '3'].includes(ev.key) && onAlbum && mode === 'view') {
+    const b = view.querySelector(`[data-decide="${['keep_flac', 'keep_mp3', 'refetch'][Number(ev.key) - 1]}"]`);
+    if (b) b.click();
+  }
 });
 
 // ---- routing -----------------------------------------------------------------

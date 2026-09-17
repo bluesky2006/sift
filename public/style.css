@@ -201,3 +201,8 @@ dialog p { margin: 0; color: var(--muted); }
 /* keyboard help */
 .keytable th { text-align: right; padding: 3px 10px 3px 0; white-space: nowrap; font-weight: 400; }
 kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; background: var(--bg); }
+
+/* diagnosis */
+.diag { margin: 0 4px 10px; padding: 10px 12px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line)); }
+.sugg { font-size: 11px; opacity: .85; margin-left: 4px; text-transform: uppercase; letter-spacing: .03em; }

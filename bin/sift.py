@@ -351,7 +351,12 @@ def item_from_plan(e, hold):
         "cover": main, "covers": sides,
         "_do": {"flac_dir": e["flac_dir"], "dest": e["dest"], "mp3_dirs": e.get("mp3_dirs", []),
                 "mp3_id": e.get("mp3_id"), "mbid": e["mbid"],
-                "hold": hold["hold"] if hold else None, "foreign_ids": e.get("foreign_ids", [])},
+                "hold": hold["hold"] if hold else None, "foreign_ids": e.get("foreign_ids", []),
+                # a shared MP3 folder blocks Keep FLAC, unless every file in it matches
+                # this FLAC: then the folder is this album, whatever the MP3 Lidarr filed
+                "shared_ok": q in ("ready", "different", "lineup") and bool(e.get("mp3_shared"))
+                             and len(e.get("mp3_dirs", [])) == 1 and not e.get("damaged_files")
+                             and not os.path.exists(e["dest"])},
         "_files": {"flac": flac_files, "mp3": mp3_files},
     }
     return item if q == "arriving" else suspect(item)
@@ -390,6 +395,67 @@ def item_from_hold(k, h):
     })
 
 
+LENGTH_SLACK = 5            # seconds two paired tracks may differ before they're called different edits
+
+
+def diagnose(item):
+    """Say in one sentence why an album didn't line up, and which decision fits. Also opens
+    Keep FLAC for a shared MP3 folder whose every file matches this FLAC."""
+    item["diagnosis"] = None
+    if not item.get("mp3") or item["queue"] in ("arriving", "damaged", "look", "ready"):
+        return item
+    mp3, flac, pairs = item["mp3"]["tracks"], item["flac"]["tracks"], item["pairs"]
+    name = lambda t: t.get("title") or t["name"]
+    matched = [p for p in pairs if p["same"] and p["f"] is not None]
+    unmatched = [mp3[p["m"]] for p in pairs if not p["same"] or p["f"] is None]
+    used = {p["f"] for p in matched}
+    spare = [t for k, t in enumerate(flac) if k not in used]
+    do = item["_do"]
+    if do.get("shared_ok"):
+        if not unmatched and pairs and "keep_flac" not in item["allowed"]:
+            item["allowed"].insert(0, "keep_flac")
+        elif unmatched and "keep_flac" in item["allowed"]:
+            item["allowed"].remove("keep_flac")
+    d = None
+    if not unmatched and pairs and do.get("shared_ok"):
+        d = {"kind": "shared", "suggest": "keep_flac",
+             "text": f"Every file in the MP3 folder matches this FLAC, so the folder is this album even though "
+                     f"the MP3 Lidarr files some of it under another. Keep FLAC bins the whole folder."}
+    elif len(flac) < len(mp3) and unmatched:
+        names = ", ".join(name(t) for t in unmatched[:3]) + ("…" if len(unmatched) > 3 else "")
+        d = {"kind": "missing", "suggest": "refetch",
+             "text": f"The FLAC is missing {len(unmatched)} track{'s' * (len(unmatched) != 1)} the MP3 has: {names}."}
+    elif not unmatched and pairs:
+        off = [(name(mp3[p["m"]]), flac[p["f"]]["secs"] - mp3[p["m"]]["secs"]) for p in matched
+               if flac[p["f"]].get("secs") and mp3[p["m"]].get("secs")
+               and abs(flac[p["f"]]["secs"] - mp3[p["m"]]["secs"]) > LENGTH_SLACK]
+        if off:
+            big = max(off, key=lambda o: abs(o[1]))
+            d = {"kind": "edits", "suggest": None,
+                 "text": f"Every track matches, but "
+                         + (f"{big[0]} differs in length" if len(off) == 1 else f"{len(off)} tracks differ in length, most {big[0]}")
+                         + f" ({'+' if big[1] > 0 else '−'}{abs(big[1]):.0f} s in the FLAC): probably different edits. Listen before deciding."}
+        elif len(flac) > len(mp3):
+            d = {"kind": "bonus", "suggest": "keep_flac" if "keep_flac" in item["allowed"] else None,
+                 "text": f"Every MP3 track matches; the FLAC has {len(flac) - len(mp3)} more (bonus tracks)."}
+    elif unmatched and len(unmatched) * 2 <= len(mp3):
+        near = [(name(u), name(t)) for u in unmatched for t in spare
+                if u.get("secs") and t.get("secs") and abs(u["secs"] - t["secs"]) <= 3]
+        if near:
+            d = {"kind": "pair", "suggest": "pair",
+                 "text": f"{near[0][0]} has no fingerprint match, but the FLAC's {near[0][1]} is the same length. "
+                         f"Listen, then pair them by hand if they're the same."}
+        else:
+            d = {"kind": "few", "suggest": None,
+                 "text": f"{len(unmatched)} of {len(mp3)} MP3 tracks have no match in the FLAC. Listen to "
+                         + ", ".join(name(t) for t in unmatched[:2]) + " in both."}
+    elif unmatched:
+        d = {"kind": "other", "suggest": "refetch",
+             "text": f"{len(unmatched)} of {len(mp3)} MP3 tracks don't match: probably a different recording or release."}
+    item["diagnosis"] = d
+    return item
+
+
 def apply_overrides(item, ov):
     """Lay Simon's hand-made pairs over the automatic ones. The automatic pairs stay in
     _auto so this can be re-run without fingerprinting anything."""
@@ -423,6 +489,7 @@ def apply_overrides(item, ov):
         item["queue"] = "ready" if all_same else "different"
         if all_same and item["_status"] == "unconfirmed":
             item["reasons"][0:0] = ["Every track matches, counting the pairs set by hand"]
+    diagnose(item)
     # a probable converted MP3 never waits in Ready, whatever else it passes
     if item.get("suspect") and item["queue"] in ("ready", "different", "lineup"):
         item["queue"] = "suspect"
@@ -537,6 +604,10 @@ def build_queue():
               if int(k) not in seen_ids and os.path.isdir(h["hold"])]
     taken = {d for i in items for d in [i["_do"].get("dest"), *i["_do"].get("mp3_dirs", [])] if d}
     owners = mp3_owners()
+    for i in items:
+        if i["_do"].get("shared_ok"):
+            i["_do"]["mp3_foreign_ids"] = sorted({owners[p] for p in i["_files"]["mp3"] if owners.get(p)}
+                                                 - {i["_do"]["mp3_id"], None})
     items += [i for i in (item_from_dupe(d, owners) for d in find_dupes(taken)) if i]
     for i in items:
         apply_overrides(i, ov.get(str(i["id"])))
@@ -791,6 +862,10 @@ def keep_flac(item, en):
         en.to_bin(d)
     if do["mp3_id"]:
         en.monitor("mp3", do["mp3_id"], False)
+    if do.get("shared_ok"):
+        # the other entries the MP3 Lidarr filed this folder's tracks under
+        for other in do.get("mp3_foreign_ids", []):
+            en.monitor("mp3", other, False)
     if do["hold"]:
         en.to_bin(do["hold"])
         en.ledger("damaged", k, None)

@@ -30,6 +30,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
   checked: new Date().toISOString(),
   items: [
     { id: 1, artist: 'Band', title: 'Record', queue: 'different', reasons: ['1 MP3 track not matched'],
+      diagnosis: { kind: 'pair', suggest: 'pair', text: "Three has no fingerprint match, but the FLAC's Two again is the same length." },
       allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, foreign: true, one_album: false, reorder: true,
       flac: { tracks: [t('One', 100), t('Three', 300), t('Two', 200), t('Two again', 200)], seconds: 800 },
       mp3: { tracks: [t('One', 100), t('Two', 200), t('Three', 300)], seconds: 600 },
@@ -47,6 +48,10 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, suspect: { low: 1, of: 1, hz: 16000, mp3_hz: 16000 },
       flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
+    { id: 4, artist: 'Cband', title: 'Next One', queue: 'different', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+      diagnosis: { kind: 'missing', suggest: 'refetch', text: 'The FLAC is missing 1 track the MP3 has: A.' },
+      flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60), t('B', 60)], seconds: 120 },
+      pairs: [{ m: 0, f: 0, sim: 0.99, same: true }, { m: 1, f: null, sim: null, same: false }], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -77,7 +82,7 @@ try {
   await page.waitForSelector('.queue');
   check(await page.locator('#approve').textContent() === 'Approve all 1', 'Ready queue offers Approve all');
   check((await page.locator('.qhead h2').allTextContents()).some((s) => s.startsWith('Different')), 'queues render');
-  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 1', 'section links with counts');
+  check((await page.locator('.jump a').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2', 'section links with counts');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a suspect album shows where its FLAC stops');
 
   console.log('search, sort, select');
@@ -90,7 +95,7 @@ try {
   await page.selectOption('#sort', 'arrived');
   check(await page.evaluate(() => localStorage.getItem('sift-sort')) === 'arrived', 'sort is remembered');
   await page.click('#selecting');
-  check(await page.locator('input.pick').count() === 3 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
+  check(await page.locator('input.pick').count() === 4 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
   await page.click('[data-all="ready"]');
   await page.locator('input[data-pick="3"]').check();
   check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
@@ -237,6 +242,24 @@ try {
   await page.goto(BASE + '/app#/album/3');
   await page.waitForSelector('.tmeta');
   check(await page.locator('.tmeta .low').count() === 1, 'a FLAC track stopping short is marked');
+
+  console.log('diagnosis and next album');
+  await page.goto(BASE + '/app#/album/1');
+  await page.waitForSelector('.diag');
+  check((await page.locator('.diag').textContent()).startsWith('Three has no fingerprint match'), 'the diagnosis leads the album');
+  check(await page.locator('#tpair.primary').count() === 1, 'a suggested pairing is the highlighted tool');
+  check((await page.locator('#later').textContent()) === 'Next album', 'Later offers the next album in the queue');
+  await page.keyboard.press('j');
+  await page.waitForSelector('.diag >> text=missing');
+  check(await page.locator('[data-decide="refetch"].primary .sugg').count() === 1, 'J opens the next album, whose suggested decision is highlighted');
+  await page.keyboard.press('k');
+  await page.waitForSelector('.diag >> text=Three');
+  check(true, 'K goes back');
+  await page.keyboard.press('2');
+  check((await page.locator('#dtitle').textContent()) === 'Keep MP3?', '2 asks to Keep MP3');
+  await page.click('#dok');
+  await page.waitForSelector('.diag >> text=missing', { timeout: 8000 }).catch(() => {});
+  check(calls().some((c) => c.endsWith('resolve 1 keep_mp3')) && page.url().endsWith('#/album/4'), 'after the decision, the next album opens');
 
   console.log('one album and bin view');
   await openAlbum();

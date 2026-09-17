@@ -309,6 +309,45 @@ over = {**sus, "id": 40, "queue": "ready", "_status": "retire", "pairs": [{"m": 
         "_files": {"flac": ["a.flac"], "mp3": ["a.mp3"]}}
 check(S.apply_overrides(over, None)["queue"] == "suspect", "a suspect album never lands in Ready")
 
+print("diagnosis")
+def diag_item(mp3_secs, flac_secs, pairs, queue="lineup", status="keep_mp3", shared=False):
+    t = lambda k, secs, side: {"name": f"{side}{k}", "title": f"T{k}", "secs": secs}
+    return {"id": 50, "queue": queue, "_status": status, "_reasons": ["r"], "reasons": ["r"],
+            "allowed": ["keep_mp3", "refetch", "watch"],
+            "mp3": {"tracks": [t(k, x, "m") for k, x in enumerate(mp3_secs)]},
+            "flac": {"tracks": [t(k, x, "f") for k, x in enumerate(flac_secs)]},
+            "pairs": pairs, "_do": {"shared_ok": shared, "mp3_id": 1},
+            "_files": {"flac": [f"f{k}" for k in range(len(flac_secs))], "mp3": [f"m{k}" for k in range(len(mp3_secs))]}}
+P = lambda m, f, same=True: {"m": m, "f": f, "sim": .9 if same else .5, "same": same}
+dg = S.apply_overrides(diag_item([100, 200], [100, 200], [P(0, 0), P(1, 1)], shared=True), None)
+check(dg["diagnosis"]["kind"] == "shared" and dg["allowed"][0] == "keep_flac",
+      "a shared MP3 folder whose every file matches opens Keep FLAC")
+dg = S.apply_overrides(diag_item([100, 200], [100, 200], [P(0, 0), P(1, None, False)], shared=True), None)
+check("keep_flac" not in dg["allowed"], "but not while a file in it is unmatched")
+dg = S.apply_overrides(diag_item([100, 200, 300], [100, 200], [P(0, 0), P(1, 1), P(2, None, False)]), None)
+check(dg["diagnosis"]["kind"] == "missing" and "T2" in dg["diagnosis"]["text"] and dg["diagnosis"]["suggest"] == "refetch",
+      "a FLAC short of tracks names them and suggests a re-fetch")
+dg = S.apply_overrides(diag_item([100, 200], [100, 260], [P(0, 0), P(1, 1)]), None)
+check(dg["diagnosis"]["kind"] == "edits" and "+60 s" in dg["diagnosis"]["text"], "matching tracks of different lengths are called edits")
+dg = S.apply_overrides(diag_item([100, 200, 300, 400], [100, 200, 300, 401], [P(0, 0), P(1, 1), P(2, 2), P(3, None, False)],
+                                 queue="different", status="unconfirmed"), None)
+check(dg["diagnosis"]["kind"] == "pair" and dg["diagnosis"]["suggest"] == "pair", "an unmatched track with a same-length spare suggests pairing")
+
+print("shared MP3 folder, Keep FLAC")
+tone(f"{DATA}/music-flac/Shared2/Alb/01.flac", "flac")
+tone(f"{MUSIC}/MP3/Shared2/Alb/01.mp3", "libmp3lame")
+sh = {"id": 51, "artist": "Shared2", "title": "Alb", "queue": "lineup", "status": "keep_mp3",
+      "allowed": ["keep_flac", "keep_mp3"], "_do": {"flac_dir": f"{DATA}/music-flac/Shared2/Alb",
+      "dest": f"{MUSIC}/FLAC/Shared2/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Shared2/Alb"], "mp3_id": 61, "mbid": "mb-51",
+      "hold": None, "foreign_ids": [], "shared_ok": True, "mp3_foreign_ids": [62]}}
+json.dump({"items": [sh]}, open(f"{STATE}/queue.json", "w"))
+open(API, "w").close()
+r = sift("resolve", "51", "keep_flac")
+calls = [json.loads(l) for l in open(API)]
+check(r.returncode == 0 and ["mp3", "PUT", "/album/monitor", {"albumIds": [62], "monitored": False}] in calls,
+      "Keep FLAC also unmonitors the MP3 entry that held some of the folder")
+sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+
 print("release details")
 import sqlite3
 db = f"{T}/lidarr.db"
