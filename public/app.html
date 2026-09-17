@@ -15,10 +15,15 @@
   <header class="top">
     <a href="#/" class="brand"><img src="/icon.svg" alt="" width="26" height="26">Sift</a>
     <nav>
-      <button id="check" class="ghost">Check now</button>
-      <a href="#/history" class="ghost">History</a>
-      <a href="#/bin" id="binlink" class="ghost">Bin</a>
-      <button id="logout" class="ghost">Sign out</button>
+      <button id="check" class="ghost" data-icon="refresh">Check now</button>
+      <div class="menu">
+        <button id="more" class="ghost" data-icon="dots" aria-label="More" title="More" aria-haspopup="true" aria-expanded="false" aria-controls="menupop"></button>
+        <div class="menupop" id="menupop" hidden>
+          <a href="#/history" class="ghost" data-icon="undo">History</a>
+          <a href="#/bin" class="ghost" data-icon="trash"><span id="binlink">Bin</span></a>
+          <button id="logout" class="ghost" data-icon="out">Sign out</button>
+        </div>
+      </div>
     </nav>
   </header>
   <p class="status" id="status"></p>
@@ -75,7 +80,7 @@
         <tr><th><kbd>A</kbd></th><td>A/B: the same moment in the other version</td></tr>
         <tr><th><kbd>←</kbd> <kbd>→</kbd></th><td>Back or forward 10 seconds</td></tr>
         <tr><th><kbd>↑</kbd> <kbd>↓</kbd></th><td>Previous or next track</td></tr>
-        <tr><th><kbd>J</kbd> <kbd>K</kbd></th><td>Next or previous album in the queue</td></tr>
+        <tr><th><kbd>J</kbd> <kbd>K</kbd></th><td>Previous or next album in the queue</td></tr>
         <tr><th><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></th><td>Stage Keep FLAC, Keep MP3 or Get a better FLAC</td></tr>
         <tr><th><kbd>Esc</kbd></th><td>Leave pairing, ordering or spectrograms</td></tr>
         <tr><th><kbd>?</kbd></th><td>This list</td></tr>

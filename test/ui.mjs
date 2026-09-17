@@ -314,12 +314,12 @@ try {
   check((await page.locator('.diag').textContent()).startsWith('Three has no fingerprint match'), 'the diagnosis leads the album');
   check(await page.locator('#tpair.primary').count() === 1, 'a suggested pairing is the highlighted tool');
   check((await page.locator('#later').textContent()) === 'Next album', 'Later offers the next album in the queue');
-  await page.keyboard.press('j');
-  await page.waitForSelector('.diag >> text=missing');
-  check(await page.locator('[data-decide="refetch"].primary .sugg').count() === 1, 'J opens the next album, whose suggested decision is highlighted');
   await page.keyboard.press('k');
+  await page.waitForSelector('.diag >> text=missing');
+  check(await page.locator('[data-decide="refetch"].primary .sugg').count() === 1, 'K opens the next album, whose suggested decision is highlighted');
+  await page.keyboard.press('j');
   await page.waitForSelector('.diag >> text=Three');
-  check(true, 'K goes back');
+  check(true, 'J goes back');
   await page.keyboard.press('2');
   await page.waitForSelector('.diag >> text=missing', { timeout: 8000 }).catch(() => {});
   check(!calls().some((c) => c.endsWith('keep_mp3')) && page.url().endsWith('#/album/4'), '2 stages Keep MP3 and the next album opens');

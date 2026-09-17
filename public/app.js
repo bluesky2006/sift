@@ -51,6 +51,8 @@ const ICONS = {
   trash: 'M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2',
   thumb: 'M7 10v12M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88z',
   next: 'M5 12h14M13 5l7 7-7 7',
+  chev: 'M6 9l6 6 6-6',
+  previous: 'M19 12H5M11 5l-7 7 7 7',
   x: 'M18 6 6 18M6 6l12 12',
   select: 'M9 11l3 3 8-8M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11',
   layers: 'M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5',
@@ -62,6 +64,9 @@ const ICONS = {
   save: 'M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8',
   ban: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM4.93 4.93l14.14 14.14',
   undo: 'M3 7v6h6M21 17a9 9 0 0 0-15-6.7L3 13',
+  dots: 'M6 12h.01M12 12h.01M18 12h.01',
+  clock: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2',
+  out: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9',
   up: 'M12 19V5M5 12l7-7 7 7',
   down: 'M12 5v14M19 12l-7 7-7-7',
   ab: 'M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4',
@@ -123,7 +128,8 @@ const isNew = (i) => state.previous_check && i.first_seen > state.previous_check
 const stagedOf = (id) => (state.staged || []).find((e) => e.id === id);
 // a staged album leaves its queue for the Staged tab until it is approved or unstaged
 const queueOf = (i) => (stagedOf(i.id) ? 'staged' : i.queue);
-const stagedText = (e) => (DECISION_TEXT[e.decision] || [e.decision])[0] + (e.release ? ` · ${e.release}` : '');
+const stagedName = (e) => (DECISION_TEXT[e.decision] || [e.decision])[0];
+const stagedText = (e) => stagedName(e) + (e.release ? ` · ${e.release}` : '');
 
 function toast(text) {
   const t = $('toast');
@@ -168,10 +174,17 @@ function renderStatus() {
   const staged = items.filter((i) => stagedOf(i.id)).length;
   const ready = items.filter((i) => queueOf(i) === 'ready').length;
   const binBytes = state.bin.reduce((n, e) => n + e.bytes, 0);
-  $('status').textContent = `Checked ${ago(state.checked)}`
-    + (fresh ? ` · ${fresh} new since the check before` : '')
-    + ` · ${ready} ready · ${items.length - ready - staged} to review`
-    + (staged ? ` · ${staged} staged` : '');
+  const stat = (n, label, to) => (to
+    ? `<button class="stat" data-goto="${to}"><b>${n}</b>${label}</button>`
+    : `<span class="stat"><b>${n}</b>${label}</span>`);
+  $('status').innerHTML = `<span class="when">${ic('clock')}Checked ${esc(ago(state.checked))}</span>`
+    + (fresh ? `<span class="stat fresh"><b>${fresh}</b>new</span>` : '')
+    + stat(ready, 'ready', 'ready')
+    + stat(items.length - ready - staged, 'to review')
+    + (staged ? stat(staged, 'staged', 'staged') : '');
+  $('status').querySelectorAll('[data-goto]').forEach((b) => {
+    b.onclick = () => { tab = b.dataset.goto; localStorage.setItem('sift-tab', tab); renderList(); window.scrollTo(0, 0); };
+  });
   $('binlink').textContent = state.bin.length ? `Bin (${gb(binBytes)})` : 'Bin';
 }
 
@@ -180,7 +193,6 @@ async function watchJob() {
   if (polling) return;
   polling = true;
   const bar = $('jobbar');
-  bar.hidden = false;
   $('jobspin').hidden = false;
   $('jobclose').hidden = true;
   $('joboutput').hidden = true;
@@ -188,6 +200,10 @@ async function watchJob() {
     for (;;) {
       const { job } = await api('/api/job');
       if (!job) break;
+      // a check says so in its own button; a failure is a toast, and the error is kept in History
+      const inline = job.kind === 'check';
+      checking(inline && !job.done);
+      bar.hidden = inline;
       $('joblabel').textContent = job.label + (job.done ? (job.ok ? ' — done' : ' — failed') : '…');
       if (job.kind === 'apply-staged') followApproval(job);
       if (job.done) {
@@ -197,6 +213,7 @@ async function watchJob() {
         if (!job.ok) afterJob = null;
         if (job.ok && /^skipped /m.test(job.output)) {
           // some went ahead and some didn't: keep the bar open with what was skipped
+          bar.hidden = false;
           $('joboutput').textContent = job.output;
           $('joboutput').hidden = false;
           $('jobclose').hidden = false;
@@ -206,6 +223,8 @@ async function watchJob() {
             keep_mp3: 'Done. Undo is in the bin.', refetch: 'FLAC is in the bin and Soularr will look again.',
             'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
           if (note) toast(note);
+        } else if (inline) {
+          toast('The check failed. History has the error.');
         } else {
           $('joboutput').textContent = job.output;
           $('joboutput').hidden = false;
@@ -216,9 +235,20 @@ async function watchJob() {
       }
       await new Promise((r) => setTimeout(r, approving.size ? 600 : 1500));
     }
-  } finally { polling = false; }
+  } finally { polling = false; checking(false); }
 }
 $('jobclose').onclick = () => { $('jobbar').hidden = true; };
+
+// Check now becomes the progress: a spinner and 'Checking…' while the check runs
+let checkHtml = null;
+function checking(on) {
+  const b = $('check');
+  if (checkHtml === null) checkHtml = b.innerHTML;
+  if (on === b.classList.contains('busy')) return;
+  b.classList.toggle('busy', on);
+  b.disabled = on;
+  b.innerHTML = on ? `<span class="spinner"></span>Checking…` : checkHtml;
+}
 
 // Stop playback and let go of the files before anything moves them.
 function releaseAudio() {
@@ -260,8 +290,12 @@ function row(i) {
   if (st) {
     return `<div class="row stagedrow"><input type="checkbox" class="approvepick" data-approve="${i.id}" ${unticked.has(i.id) ? '' : 'checked'}
       aria-label="Approve ${esc(i.artist)} — ${esc(i.title)}"><a class="rlink" href="#/album/${i.id}">${inner.replace('<span class="badges">',
-        `<span class="badges"><span class="badge decision">${esc(stagedText(st))}</span>`)}</a>
-      <button class="ghost small" data-unstage="${i.id}">${ic('x')}Remove</button></div>`;
+        `<span class="badges">${st.release
+          ? `<span class="badge decision more" role="button" tabindex="0" data-more="${i.id}" aria-expanded="false"
+              aria-controls="more-${i.id}" title="Which release">${esc(stagedName(st))}${ic('chev')}</span>`
+          : `<span class="badge decision">${esc(stagedName(st))}</span>`}`)}</a>
+      <button class="ghost small" data-unstage="${i.id}" aria-label="Remove from Staged" title="Remove from Staged">${ic('x')}<span class="lbl">Remove</span></button>
+      ${st.release ? `<p class="rdetail" id="more-${i.id}" hidden>Release: ${esc(st.release)}</p>` : ''}</div>`;
   }
   if (selecting) {
     return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
@@ -337,6 +371,18 @@ function renderList() {
   }
   view.querySelectorAll('[data-approve]').forEach((c) => {
     c.onchange = () => { const id = Number(c.dataset.approve); if (c.checked) unticked.delete(id); else unticked.add(id); renderApproveButton(); };
+  });
+  // the pill stays short; the release it was staged with opens under the row
+  view.querySelectorAll('[data-more]').forEach((b) => {
+    const toggle = (ev) => {
+      ev.preventDefault(); ev.stopPropagation();
+      const p = $(`more-${b.dataset.more}`);
+      p.hidden = !p.hidden;
+      b.setAttribute('aria-expanded', String(!p.hidden));
+      b.classList.toggle('open', !p.hidden);
+    };
+    b.onclick = toggle;
+    b.onkeydown = (ev) => { if (ev.key === 'Enter' || ev.key === ' ') toggle(ev); };
   });
   view.querySelectorAll('[data-unstage]').forEach((b) => {
     b.onclick = async () => {
@@ -443,7 +489,7 @@ $('selcancel').onclick = () => { selecting = false; selected.clear(); renderList
 function neighbours(a) {
   const list = state.items.filter((i) => queueOf(i) === queueOf(a) && matches(i)).sort(SORTS[sortBy][1]);
   const k = list.findIndex((i) => i.id === a.id);
-  return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null };
+  return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null, at: k, of: list.length };
 }
 let afterJob = null;          // where to go once the decision in progress succeeds
 
@@ -647,13 +693,16 @@ async function renderAlbum(id, keepMode = false) {
   const buttons = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album', 'dismiss'].filter((d) => a.allowed.includes(d))
     .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${ic(DECISION_ICON[d])}${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
   const near = neighbours(a);
-  if (a.allowed.length) buttons.push(`<a class="button ghost" id="later" href="${near.next ? `#/album/${near.next.id}` : '#/'}">${ic('next')}${near.next ? 'Next album' : 'Later'}</a>`);
+  const step = (to, id, label) => (to ? `<a class="button ghost small" id="${id}" href="#/album/${to.id}">${label}</a>`
+    : `<button class="ghost small" id="${id}" disabled>${label}</button>`);
+  const pager = near.at >= 0 && near.of > 1 ? `<span class="pager">${step(near.prev, 'earlier', `${ic('previous')}Previous`)}
+    <span class="muted">${near.at + 1} of ${near.of}</span>${step(near.next, 'later', `Next album${ic('next')}`)}</span>` : '';
   const watch = a.allowed.includes('watch')
-    ? `<label class="switch"><input type="checkbox" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
+    ? `<label class="switch"><input type="checkbox" role="switch" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
   const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : (a.health ? 'In the FLAC library' : 'No MP3'),
     `FLAC ${clock(a.flac.seconds)} · ${a.flac.tracks.length} tracks`].join('  vs  ');
 
-  view.innerHTML = `<a href="#/" class="back">← All albums</a>
+  view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a>${pager}</div>
     <div class="ahead">
       ${a.cover ? `<img class="cover" src="/api/cover/${a.id}" alt="">` : '<span class="cover none"></span>'}
       <div><p class="qname">${esc(qname)}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
@@ -998,7 +1047,7 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 // ---- the bin -----------------------------------------------------------------
 
 const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC', bin_album: 'Album put in the bin',
-  adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked' };
+  check: 'Check for new arrivals', adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked' };
 
 function renderBin() {
   document.title = 'Bin · Sift';
@@ -1116,9 +1165,10 @@ document.addEventListener('keydown', (ev) => {
   else if ((ev.key === 'ArrowDown' || ev.key === 'ArrowUp') && onAlbum && mode !== 'order') {
     ev.preventDefault();
     keyRows(ev.key === 'ArrowDown' ? 1 : -1);
+  } else if (ev.key === 'Escape' && !$('menupop').hidden) { menu(false); $('more').focus();
   } else if (ev.key === 'Escape' && onAlbum && mode !== 'view') { mode = 'view'; picked = null; renderAlbum(album.id, true); }
   else if ((ev.key === 'j' || ev.key === 'k') && onAlbum) {
-    const n = neighbours(album)[ev.key === 'j' ? 'next' : 'prev'];
+    const n = neighbours(album)[ev.key === 'k' ? 'next' : 'prev'];
     if (n) location.hash = `#/album/${n.id}`;
   } else if (['1', '2', '3'].includes(ev.key) && onAlbum && mode === 'view') {
     const b = view.querySelector(`[data-decide="${['keep_flac', 'keep_mp3', 'refetch'][Number(ev.key) - 1]}"]`);
@@ -1142,6 +1192,15 @@ function route() {
 
 window.addEventListener('hashchange', () => { window.scrollTo(0, 0); mode = 'view'; album = null; route(); });
 $('check').onclick = () => run('/api/check', {});
+// History and Sign out live behind the ⋯ menu; anything outside it, or Esc, closes it
+const menu = (open) => {
+  $('menupop').hidden = !open;
+  $('more').setAttribute('aria-expanded', String(open));
+  $('more').classList.toggle('open', open);
+};
+$('more').onclick = (ev) => { ev.stopPropagation(); menu($('menupop').hidden); };
+$('menupop').onclick = () => menu(false);
+document.addEventListener('click', () => menu(false));
 $('logout').onclick = async () => { await fetch('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
 setInterval(() => { if (!polling) loadState().then(() => { if ((location.hash || '#/') === '#/') renderList(); }).catch(() => {}); }, 60000);
 

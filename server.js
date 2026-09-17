@@ -263,7 +263,7 @@ async function history() {
   for (const line of log.split('\n')) {
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
-    if (ev.event !== 'job-done' || ev.ok || ev.kind === 'check') continue;
+    if (ev.event !== 'job-done' || ev.ok) continue;
     events.push({ at: ev.at, decision: ev.kind, label: ev.label, outcome: 'failed', error: ev.output || '' });
   }
   // errors quote the paths they failed on; those stay here
