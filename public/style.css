@@ -237,11 +237,13 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
 .match.same { color: var(--good); }
 .match.diff { color: var(--warn); }
 
-/* player */
-.player { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto;
-  background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
+/* player - it and the selection bar share one stack, so neither hides the other */
+.dock { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto;
+  z-index: 7; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.dock > * { pointer-events: auto; }
+.player { background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
   border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow-lift);
-  display: flex; gap: 10px; align-items: center; padding: 10px 12px; animation: rise .25s ease both; z-index: 7; }
+  display: flex; gap: 10px; align-items: center; padding: 10px 12px; animation: rise .25s ease both; }
 .round { width: 44px; height: 44px; border-radius: 50%; padding: 0; flex: none; background: var(--grad); color: var(--accent-text);
   border-color: transparent; box-shadow: var(--glow); }
 .skip { width: 34px; height: 34px; border-radius: 50%; padding: 0; flex: none; font-size: 13px; line-height: 1; }
@@ -318,8 +320,7 @@ dialog p { margin: 0; color: var(--muted); }
   background: var(--panel); color: var(--text); max-width: 34%; box-shadow: var(--shadow); }
 .row.picking { cursor: pointer; }
 .row.picking .pick { width: 20px; height: 20px; flex: none; margin: 0; }
-.selbar { position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); max-width: 760px; margin: 0 auto; z-index: 6;
-  background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
+.selbar { background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
   border: 1px solid var(--line); border-radius: 20px; box-shadow: var(--shadow-lift); animation: rise .25s ease both;
   display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
 .selbar #selcount { color: var(--muted); font-size: 14px; font-weight: 500; margin-right: auto; }

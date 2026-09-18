@@ -379,6 +379,18 @@ try {
   await page.click('#pprev');
   await page.waitForTimeout(300);
   check((await page.locator('#ptitle').textContent()) === 'One', 'and Previous goes back');
+  // the player kept playing when we left the album, and both bars dock at the foot of the page
+  await page.evaluate(() => { location.hash = '#/'; });
+  await page.waitForSelector('.queue');
+  await page.click('#selecting');
+  check(await page.evaluate(() => {
+    const b = document.getElementById('selbar').getBoundingClientRect();
+    const at = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+    return !document.getElementById('player').hidden && b.height > 0 && document.getElementById('selbar').contains(at);
+  }), 'the selection bar sits clear of the player, not under it');
+  await page.click('#selcancel');
+  await page.goto(BASE + '/app#/album/1');
+  await page.waitForSelector('.play[data-side="mp3"]');
   await page.click('#pclose');
   errors.length = 0; // the album has no audio files, so the decks' load errors are expected here
 
