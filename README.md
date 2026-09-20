@@ -8,7 +8,7 @@ the MP3 you already have and sorted into a queue:
 
 | Queue | Meaning |
 |---|---|
-| Ready | Exact match: every FLAC file passes `flac -t`, every MP3 track matches a FLAC track by fingerprint, and the FLAC isn't suspect |
+| Ready | Exact match: every FLAC file passes `flac -t`, every MP3 track matches a FLAC track by fingerprint, and the FLAC isn't suspect. Albums with **no MP3 to replace** wait here too, badged: nothing confirms them, so Stage all leaves them out and each is decided on its own |
 | Suspect FLAC | Most FLAC tracks stop below 20.5 kHz, as a FLAC made from an MP3 does (`SUSPECT_HZ` in `bin/sift.py`) |
 | Different or unconfirmed version | Some MP3 tracks have no fingerprint match in the FLAC |
 | Doesn't line up | Fewer tracks, a noticeably different length, or an MP3 folder shared with another album |
@@ -86,6 +86,7 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 | Watch for a better copy | none | FLAC monitoring on or off |
 | Keep FLAC (duplicate) | MP3 → bin; the FLAC stays | MP3 unmonitored if the MP3 Lidarr has it |
 | Keep MP3 (duplicate) | FLAC → bin | none |
+| Put in the bin (no MP3) | FLAC → bin | FLAC unmonitored, recorded in `flac-returned.json` so nothing re-monitors it |
 | Put in the bin (health) | FLAC → bin | none |
 | Block this user | none | Soularr's `ignored_users` gains the user |
 

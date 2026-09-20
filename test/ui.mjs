@@ -59,6 +59,10 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       diagnosis: { kind: 'missing', suggest: 'refetch', text: 'The FLAC is missing 1 track the MP3 has: A.' },
       flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: { tracks: [t('A', 60), t('B', 60)], seconds: 120, details: { release: 'r-2', tags: {} } },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }, { m: 1, f: null, sim: null, same: false }], cover: false, _files: { flac: [], mp3: [] } },
+    { id: 9, artist: 'Lone', title: 'White Label', queue: 'ready', status: 'no_mp3',
+      reasons: ['No MP3 of this album to replace; every FLAC file decodes cleanly'],
+      allowed: ['keep_flac', 'bin_album', 'refetch', 'watch'], watch: false,
+      flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
     { id: 800000001, artist: 'Old', title: 'Library Rip', queue: 'health', reasons: ['2 FLAC file(s) fail flac -t'], allowed: ['bin_album', 'dismiss'],
       health: true, flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
   ],
@@ -91,7 +95,10 @@ try {
   await page.waitForURL(BASE + '/app');
   await page.waitForSelector('.queue');
   check(await page.locator('#approve').textContent() === 'Stage all 1', 'Ready queue offers Stage all');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 1|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'queue tabs with counts');
+  check(await page.locator('#q-ready a.row').count() === 2
+    && (await page.locator('#q-ready .badge.warn').textContent()) === 'No MP3 to replace',
+    'a ready album with no MP3 to replace says so, and Stage all counts only the other one');
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 2|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'queue tabs with counts');
   check(await page.locator('section.queue').count() === 1 && await page.locator('#q-ready').count() === 1, 'only the Ready tab shows at first');
   await page.click('[data-tab="suspect"]');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a tab shows its queue; a suspect album shows where its FLAC stops');
@@ -108,8 +115,10 @@ try {
   await page.selectOption('#sort', 'arrived');
   check(await page.evaluate(() => localStorage.getItem('sift-sort')) === 'arrived', 'sort is remembered');
   await page.click('#selecting');
-  check(await page.locator('input.pick').count() === 1 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
+  check(await page.locator('input.pick').count() === 2 && await page.locator('#selbar').isVisible(), 'Select shows checkboxes and the decision bar');
   await page.click('[data-all="ready"]');
+  check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all takes the whole queue, no-MP3 album included');
+  await page.locator('input[data-pick="9"]').uncheck();   // left out by hand, as Stage all would have done for us
   await page.click('[data-tab="suspect"]');
   await page.locator('input[data-pick="3"]').check();
   check((await page.locator('#selcount').textContent()) === '2 selected', 'Select all and a tick both count');
@@ -118,7 +127,7 @@ try {
   await page.waitForSelector('[data-tab="staged"]');
   check(!calls().some((c) => /resolve|apply-staged/.test(c)), 'a decision on the selection is staged, and nothing runs');
   check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 0|Different or unconfirmed 2|Health 1',
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 1|Different or unconfirmed 2|Health 1',
     'the staged albums leave their queues for a Staged tab');
 
   console.log('staged');
@@ -329,6 +338,25 @@ try {
   await page.click('#unstage');
   await page.waitForTimeout(500);
   check(await page.locator('.stagednote').count() === 0, 'and Remove unstages it there');
+
+  console.log('no MP3 to replace');
+  await page.goto(BASE + '/app#/album/9');
+  await page.waitForSelector('[data-decide="keep_flac"]');
+  check(await page.locator('[data-decide="keep_flac"].primary').count() === 0, 'Keep FLAC is not the suggested decision when nothing confirms the album');
+  await page.click('[data-decide="keep_flac"]');
+  check((await page.locator('#dbody').textContent()).includes('no MP3 of it to bin'), 'and the confirmation says nothing is being replaced');
+  await page.click('#dcancel');
+  check((await page.locator('.decisions button').allTextContents()).join('|') === 'Keep FLAC|Get a better FLAC|Put in the bin',
+    'Put in the bin is offered, so an album that is not a good match can go');
+  await page.click('[data-decide="bin_album"]');
+  await page.waitForTimeout(400);
+  await page.evaluate(() => { location.hash = '#/'; });
+  await page.click('[data-tab="staged"]');
+  await page.waitForSelector('[data-unstage="9"]');
+  check((await page.locator('.stagedrow:has([data-unstage="9"]) .badge.decision').textContent()) === 'Put in the bin',
+    'binning it waits in Staged like any other decision');
+  await page.click('[data-unstage="9"]');                 // leave the queue as it was
+  await page.waitForTimeout(300);
 
   console.log('library health');
   await page.goto(BASE + '/app#/album/800000001');

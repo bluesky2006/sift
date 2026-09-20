@@ -8,7 +8,8 @@ const view = $('view');
 
 const QUEUES = [
   ['staged', 'Staged', "Decisions waiting for your approval. Nothing has moved yet. Untick any you're unsure of, then approve the rest."],
-  ['ready', 'Ready', 'Exact matches: every track matches the MP3 by fingerprint and every FLAC file decodes cleanly.'],
+  ['ready', 'Ready', 'Exact matches: every track matches the MP3 by fingerprint and every FLAC file decodes cleanly. '
+    + 'An album badged "No MP3 to replace" has nothing to match against, so Stage all leaves it for you to decide on its own.'],
   ['suspect', 'Suspect FLAC', 'Most FLAC tracks stop short of the top of the spectrum, as a FLAC made from an MP3 does. Compare the spectrograms before deciding: some old or lo-fi recordings stop early too.'],
   ['different', 'Different or unconfirmed version', "The fingerprints don't prove the FLAC is the same recording as the MP3."],
   ['lineup', "Doesn't line up", 'Fewer tracks, a noticeably different length, or an MP3 folder shared with another album.'],
@@ -280,6 +281,7 @@ function row(i) {
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
   if (i.mp3) badges.push(`<span class="badge mp3">MP3 ${esc(i.mp3.fmt)} · ${i.mp3.n}</span>`);
+  if (i.no_mp3) badges.push('<span class="badge warn">No MP3 to replace</span>');
   if (i.flac && i.flac.damaged) badges.push(`<span class="badge bad">${i.flac.damaged} damaged</span>`);
   if (i.suspect) badges.push(`<span class="badge bad">FLAC stops at ${khz(i.suspect.hz)}</span>`);
   const inner = `${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
@@ -335,9 +337,11 @@ function renderList() {
     $('queues').innerHTML = search ? '<p class="empty">No album matches.</p>' : '';
   } else {
     const { key, name, blurb, items } = cur;
+    // Stage all is for the albums an MP3 confirms; one with no MP3 to replace is decided on its own
+    const confirmed = items.filter((i) => !i.no_mp3);
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
       + (selecting && items.length && key !== 'staged' ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
-      + (!selecting && !search && key === 'ready' && items.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${items.length}</button>` : '')
+      + (!selecting && !search && key === 'ready' && confirmed.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${confirmed.length}</button>` : '')
       + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
     $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
@@ -686,10 +690,16 @@ async function renderAlbum(id, keepMode = false) {
   const refetchText = ['Get a better FLAC', a.lidarr_flac
     ? `The FLAC goes in the bin${kept}. Lidarr-FLAC has this album${a.lidarr_flac.monitored ? ', already monitored,' : ''} and Soularr will look for another copy, which comes back through the review queue.`
     : `The FLAC goes in the bin${kept}. Lidarr-FLAC doesn't have this album (usually because MusicBrainz doesn't), so nothing will look for another copy: this is the same as ${a.dupe ? 'Keep MP3' : 'Put in the bin'} for now.`];
-  const texts = a.dupe ? { ...DUPE_TEXT, refetch: refetchText } : a.health ? { ...DECISION_TEXT, refetch: refetchText } : DECISION_TEXT;
+  // nothing was found to replace, so Keep FLAC bins nothing: say so rather than promise a retirement
+  const keepFlacText = ['Keep FLAC', 'The FLAC moves into the Roon FLAC library. There is no MP3 of it to bin, '
+    + 'so check this is an album you meant to have before keeping it.'];
+  const binText = ['Put in the bin', "The FLAC goes in the bin, nothing replaces it, and Soularr won't fetch it again. "
+    + 'Undo is in the bin, and Watch puts it back on the wanted list.'];
+  const texts = a.dupe ? { ...DUPE_TEXT, refetch: refetchText } : a.health ? { ...DECISION_TEXT, refetch: refetchText }
+    : a.no_mp3 ? { ...DECISION_TEXT, keep_flac: keepFlacText, bin_album: binText } : DECISION_TEXT;
   const diag = a.diagnosis;
   // with a diagnosis, only its suggestion is highlighted, or nothing when it says listen first
-  const primary = diag ? (a.allowed.includes(diag.suggest) ? diag.suggest : null) : 'keep_flac';
+  const primary = diag ? (a.allowed.includes(diag.suggest) ? diag.suggest : null) : a.no_mp3 ? null : 'keep_flac';
   const buttons = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album', 'dismiss'].filter((d) => a.allowed.includes(d))
     .map((d) => `<button class="${d === primary || (a.health && d === 'dismiss') ? 'primary' : ''}" data-decide="${d}">${ic(DECISION_ICON[d])}${texts[d][0]}${diag && diag.suggest === d ? ' <span class="sugg">suggested</span>' : ''}</button>`);
   const near = neighbours(a);
@@ -738,7 +748,9 @@ async function renderAlbum(id, keepMode = false) {
       const stageable = ['keep_flac', 'keep_mp3', 'refetch', 'bin_album'].includes(b.dataset.decide);
       // staging asks only when there is a release to choose; Looks fine runs now, so it asks
       // a duplicate's or library album's re-fetch depends on whether Lidarr-FLAC has the album, so it says which
-      const answer = stageable && !rels && !((a.dupe || a.health) && b.dataset.decide === 'refetch') ? true
+      // keeping a FLAC nothing confirms asks too: it is the one decision that adds an album you never had
+      const answer = stageable && !rels && !((a.dupe || a.health) && b.dataset.decide === 'refetch')
+        && !(a.no_mp3 && b.dataset.decide === 'keep_flac') ? true
         : await ask({ title: `${title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
       if (!answer) return;
       const n = neighbours(a).next || neighbours(a).prev;

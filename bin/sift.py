@@ -2,7 +2,7 @@
 """Sift's engine: builds the review queue and carries out decisions. See ~/sift/README.md.
 
     sift.py check                      classify every FLAC album, write queue.json
-    sift.py resolve ID DECISION        keep_flac | keep_mp3 | refetch | watch_on | watch_off
+    sift.py resolve ID DECISION        keep_flac | keep_mp3 | bin_album | refetch | watch_on | watch_off
     sift.py resolve ID refetch N       re-fetch, looking for the album's Nth release in the list
     sift.py approve-ready              keep_flac for everything in the Ready queue
     sift.py undo ENTRY                 reverse a decision that is still in the bin
@@ -392,6 +392,10 @@ def item_from_plan(e, hold):
     else:
         if has_mp3:
             allowed.append("keep_mp3")
+        elif e["status"] == "no_mp3":
+            # nothing was replaced, so there is no Keep MP3 to throw it out with:
+            # Put in the bin is the only way to say this album was never wanted
+            allowed.append("bin_album")
         allowed += ["refetch", "watch"]
     main, sides = covers(e["flac_id"], [e["flac_dir"]], flac_files, e.get("mp3_dirs", []), mp3_files)
     item = {
@@ -1427,6 +1431,26 @@ def keep_mp3(item, en):
         en.ledger("damaged", k, None)
 
 
+def bin_album(item, en):
+    """An album with no MP3 behind it that wasn't wanted: the FLAC goes in the bin and
+    nothing takes its place. Unmonitored, and recorded in the returned ledger so Soularr
+    won't put it back on the wanted list - which Watch undoes, as it does for Keep MP3."""
+    do, k = item["_do"], str(item["id"])
+    if item.get("one_album"):
+        for other in do.get("foreign_ids", []):
+            en.monitor("flac", other, False)
+    en.monitor("flac", item["id"], False)
+    en.ledger("returned", k, {"mbid": do["mbid"], "artist": item["artist"],
+                              "title": item["title"], "status": "bin_album",
+                              "decision": "sift_bin_album", "mp3_id": None,
+                              "mp3_dirs": [], "decided": now()})
+    if do["flac_dir"]:
+        en.to_bin(do["flac_dir"])
+    if do["hold"]:
+        en.to_bin(do["hold"])
+        en.ledger("damaged", k, None)
+
+
 def refetch(item, en):
     do, k = item["_do"], str(item["id"])
     if item.get("one_album"):
@@ -1467,7 +1491,7 @@ def dupe_refetch(item, en):
         en.monitor("flac", item["_do"]["flac_album"], True)
 
 
-DECISIONS = {"keep_flac": keep_flac, "keep_mp3": keep_mp3, "refetch": refetch}
+DECISIONS = {"keep_flac": keep_flac, "keep_mp3": keep_mp3, "refetch": refetch, "bin_album": bin_album}
 STAGEABLE = {"keep_flac", "keep_mp3", "refetch", "bin_album"}
 DUPE_DECISIONS = {"keep_flac": dupe_keep_flac, "keep_mp3": dupe_keep_mp3, "refetch": dupe_refetch}
 

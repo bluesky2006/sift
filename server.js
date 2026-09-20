@@ -337,6 +337,7 @@ async function handle(req, res) {
       id: i.id, artist: i.artist, title: i.title, queue: i.queue, reasons: i.reasons,
       cover: i.cover, first_seen: i.first_seen, watch: i.watch, allowed: i.allowed,
       suspect: i.suspect || null, dupe: !!i.dupe, diagnosis: i.diagnosis || null,
+      no_mp3: i.status === 'no_mp3',
       flac: i.flac ? { n: i.flac.tracks.length, fmt: (i.flac.tracks[0] || {}).fmt || '',
         damaged: i.flac.tracks.filter((t) => t.damaged).length } : null,
       mp3: i.mp3 ? { n: i.mp3.tracks.length, fmt: (i.mp3.tracks[0] || {}).fmt || '' } : null,
@@ -368,7 +369,7 @@ async function handle(req, res) {
     };
     const paths = item.dupe && item._files
       ? { flac: (item._files.flac || []).map(inRoot), mp3: (item._files.mp3 || []).map(inRoot) } : undefined;
-    return json(res, 200, { ...pub(item), ...(paths ? { paths } : {}) });
+    return json(res, 200, { ...pub(item), no_mp3: item.status === 'no_mp3', ...(paths ? { paths } : {}) });
   }
 
   if ((m = /^\/api\/audio\/(\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && (req.method === 'GET' || req.method === 'HEAD')) {
@@ -489,9 +490,11 @@ async function handle(req, res) {
       return j ? json(res, 202, { job: j.id }) : busy();
     }
     if (p === '/api/approve-ready') {
-      // stages Keep FLAC for every ready album; nothing moves until the staged list is approved
+      // stages Keep FLAC for every ready album; nothing moves until the staged list is approved.
+      // Albums with no MP3 to replace are left out: nothing confirms them, so they are decided one by one.
       const q = await readState('queue.json', { items: [] });
-      const ids = q.items.filter((i) => i.queue === 'ready' && i.allowed.includes('keep_flac')).map((i) => i.id);
+      const ids = q.items.filter((i) => i.queue === 'ready' && i.status !== 'no_mp3'
+        && i.allowed.includes('keep_flac')).map((i) => i.id);
       if (!ids.length) return json(res, 400, { error: 'nothing ready' });
       await stage(q, ids.map((id) => ({ id, decision: 'keep_flac' })));
       audit({ event: 'stage-ready', ids });

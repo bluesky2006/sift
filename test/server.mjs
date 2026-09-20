@@ -37,6 +37,11 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
   }, {
+    id: 8, artist: 'Lone', title: 'Single', queue: 'ready', status: 'no_mp3', reasons: ['No MP3 of this album to replace'],
+    allowed: ['keep_flac', 'refetch', 'watch'],
+    flac: { tracks: [{ name: '01.flac' }] }, mp3: null, pairs: [], cover: false,
+    _do: { flac_dir: '/secret/lone' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac')], mp3: [] },
+  }, {
     id: 6, artist: 'Dup', title: 'Both', queue: 'dupes', dupe: true, reasons: ['r'], allowed: ['keep_flac', 'keep_mp3'],
     flac: { tracks: [{ name: 'a.flac' }, { name: 'b.flac' }] }, mp3: { tracks: [{ name: 'a.mp3' }] }, pairs: [], cover: false,
     _do: { kind: 'dupe' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/secret/elsewhere/b.flac'], mp3: [path.join(MUSIC, 'Art/Alb/a.mp3')] },
@@ -184,6 +189,11 @@ try {
   check(sg.length === 2 && sg.every((e) => e.decision === 'refetch' && e.release === null), 'replacing what each had staged, release and all');
   r = await req('/api/approve-ready', { method: 'POST', body: {}, csrf });
   check(r.status === 200 && (await stagedNow()).find((e) => e.id === 1).decision === 'keep_flac', 'Approve all ready stages Keep FLAC');
+  check((await r.json()).staged === 1 && !(await stagedNow()).some((e) => e.id === 8),
+    'and leaves out the ready album with no MP3 to replace');
+  check((await req('/api/decide', { method: 'POST', body: { id: 8, decision: 'keep_flac' }, csrf })).status === 200
+    && (await stagedNow()).some((e) => e.id === 8), 'which can still be staged on its own');
+  await req('/api/unstage', { method: 'POST', body: { ids: [8] }, csrf });
 
   console.log('unstaging and approving');
   check((await req('/api/unstage', { method: 'POST', body: { ids: ['2'] }, csrf })).status === 400, 'unstage takes integer ids');

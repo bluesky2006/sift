@@ -60,6 +60,10 @@ def write_queue():
          "allowed": ["keep_mp3", "refetch", "watch"], "watch": True,
          "_do": {"flac_dir": None, "dest": None, "mp3_dirs": [f"{MUSIC}/MP3/Art2/Alb2"],
                  "mp3_id": 12, "mbid": "mb-2", "hold": f"{MUSIC}/FLAC-damaged/Art2/Alb2"}},
+        {"id": 4, "artist": "Art4", "title": "Lone", "queue": "ready", "status": "no_mp3",
+         "allowed": ["keep_flac", "bin_album", "refetch", "watch"], "watch": False,
+         "_do": {"flac_dir": f"{DATA}/music-flac/Art4/Lone", "dest": f"{MUSIC}/FLAC/Art4/Lone",
+                 "mp3_dirs": [], "mp3_id": None, "mbid": "mb-4", "hold": None}},
         {"id": 3, "artist": "Art3", "title": "Shared", "queue": "lineup", "status": "keep_mp3",
          "allowed": ["keep_mp3", "refetch", "watch"], "watch": False,
          "_do": {"flac_dir": f"{DATA}/music-flac/Art3/Shared", "dest": f"{MUSIC}/FLAC/Art3/Shared",
@@ -77,6 +81,7 @@ def setup():
     tone(f"{MUSIC}/FLAC-damaged/Art2/Alb2/01.flac", "flac")
     tone(f"{MUSIC}/MP3/Art2/Alb2/01.mp3", "libmp3lame")
     tone(f"{DATA}/music-flac/Art3/Shared/01.flac", "flac")
+    tone(f"{DATA}/music-flac/Art4/Lone/01.flac", "flac")
     os.makedirs(f"{MUSIC}/FLAC", exist_ok=True)
     json.dump(conf, open(f"{T}/conf.json", "w"))
     json.dump({"2": {"artist": "Art2", "title": "Alb2", "mbid": "mb-2", "mp3_id": 12,
@@ -124,6 +129,23 @@ check(load(conf["returned"]) == returned_before, "returned ledger restored")
 calls = [json.loads(l) for l in open(API)]
 check(["flac", "PUT", "/album/monitor", {"albumIds": [1], "monitored": True}] in calls, "monitoring restored")
 check(load(f"{STATE}/bin.json")["entries"] == [], "bin entry gone")
+
+print("binning an album with no MP3 behind it")
+before4 = snapshot()
+r = sift("resolve", "4", "bin_album")
+check(r.returncode == 0, "succeeds")
+check(not os.path.exists(f"{DATA}/music-flac/Art4/Lone"), "the FLAC leaves the queue folder")
+check(not os.path.exists(f"{MUSIC}/FLAC/Art4/Lone"), "and nothing is put in the library")
+calls = [json.loads(l) for l in open(API)]
+check(["flac", "PUT", "/album/monitor", {"albumIds": [4], "monitored": False}] in calls,
+      "unmonitored, so Soularr doesn't fetch it again")
+check(load(conf["returned"])["4"]["decision"] == "sift_bin_album", "recorded in the returned ledger")
+e4 = load(f"{STATE}/bin.json")["entries"][-1]
+check(e4["decision"] == "bin_album", "the bin entry says what it was")
+r = sift("undo", e4["id"])
+check(r.returncode == 0 and snapshot() == before4, "undo puts it back")
+check("4" not in load(conf["returned"]), "and the ledger entry goes with it")
+write_queue()
 
 print("keep MP3 on a damaged hold")
 write_queue()
@@ -377,6 +399,16 @@ check(dg["diagnosis"]["kind"] == "missing" and dg["diagnosis"]["suggest"] == "ke
 other = diag_item([100, 200], [150, 250], [P(0, None, False), P(1, None, False)], queue="dupes", status="dupe")
 other["allowed"] = ["keep_flac", "keep_mp3"]
 check(S.apply_overrides(other, None)["diagnosis"]["suggest"] is None, "and suggests nothing when it can't take the suggestion")
+
+print("what an album with no MP3 may be decided")
+lone_plan = {"status": "no_mp3", "notes": [], "flac_files": [], "mp3_files": [],
+             "flac_dir": f"{DATA}/music-flac/Art4/Lone", "dest": f"{MUSIC}/FLAC/Art4/Lone",
+             "mbid": "mb-4", "flac_id": 4, "artist": "Art4", "title": "Lone", "monitored": False}
+S.CONF["flac_db"] = f"file:{T}/none.db?mode=ro"        # never the real Lidarr database
+lone = S.item_from_plan(lone_plan, None)
+S._releases.clear()                                    # the release test below reads its own
+check(lone["queue"] == "ready" and lone["allowed"] == ["keep_flac", "bin_album", "refetch", "watch"],
+      "Put in the bin stands in for the Keep MP3 it can't have")
 
 print("shared MP3 folder, Keep FLAC")
 tone(f"{DATA}/music-flac/Shared2/Alb/01.flac", "flac")
