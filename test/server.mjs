@@ -108,7 +108,8 @@ try {
     'a library duplicate shows each file inside its music folder');
   check(dup.paths.flac[1] === null && !JSON.stringify(dup).includes(MUSIC) && !JSON.stringify(dup).includes('/secret'),
     'never an absolute path, nor a file outside the music folders');
-  check(!al.includes('"paths"'), 'and other albums carry none');
+  const alj = JSON.parse(al);
+  check(alj.paths && alj.paths.flac.every((f) => f === null || !f.startsWith('/')), 'other albums carry the same relative paths, never absolute');
   const wrongHost = await new Promise((ok) => http.get({ host: '127.0.0.1', port: PORT, path: '/api/auth/status', headers: { Host: 'evil.example' } },
     (r) => { r.resume(); ok(r.statusCode); }));
   check(wrongHost === 421, 'a request for another host name is refused');

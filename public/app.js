@@ -39,6 +39,8 @@ let album = null;            // the album on screen, with its rows
 let search = '';
 let sortBy = localStorage.getItem('sift-sort') || 'artist';
 let tab = localStorage.getItem('sift-tab') || 'ready';
+// "Show file paths" in the ⋯ menu: each track's path inside its music folder, on every album
+let showPaths = localStorage.getItem('sift-paths') === 'on';
 let selecting = false;
 const approving = new Set(); // ids in the approval job now running, followed row by row
 const unticked = new Set();   // staged decisions left out of the next approval
@@ -532,7 +534,7 @@ function cell(a, side, idx, rowIdx) {
     <span class="ttext"><span class="ttitle">${trackNo(a[side].tracks, t)}${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
       ? ` · <span class="${side === 'flac' && t.cutoff < SUSPECT_HZ ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
-      ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}${a.paths && a.paths[side][idx]
+      ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}${(a.dupe || showPaths) && a.paths && a.paths[side][idx]
       ? `<span class="tpath">${esc(a.paths[side][idx])}</span>` : ''}</span></div>`;
 }
 
@@ -1213,6 +1215,14 @@ const menu = (open) => {
 $('more').onclick = (ev) => { ev.stopPropagation(); menu($('menupop').hidden); };
 $('menupop').onclick = () => menu(false);
 document.addEventListener('click', () => menu(false));
+const pathsLabel = () => { $('paths').textContent = showPaths ? 'Hide file paths' : 'Show file paths'; };
+pathsLabel();
+$('paths').onclick = () => {
+  showPaths = !showPaths;
+  localStorage.setItem('sift-paths', showPaths ? 'on' : 'off');
+  pathsLabel();
+  if (location.hash.startsWith('#/album/')) route();
+};
 $('logout').onclick = async () => { await fetch('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
 setInterval(() => { if (!polling) loadState().then(() => { if ((location.hash || '#/') === '#/') renderList(); }).catch(() => {}); }, 60000);
 

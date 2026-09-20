@@ -361,13 +361,14 @@ async function handle(req, res) {
     const q = await readState('queue.json', { items: [] });
     const item = q.items.find((i) => i.id === Number(m[1]));
     if (!item) return json(res, 404, { error: 'not in the queue' });
-    // Library duplicates show where each copy lives, as the path inside its music folder
+    // Every album says where each file lives, as the path inside its music folder
     // ("FLAC/Artist/Album/01.flac"): never the absolute path, and nothing outside the roots.
+    // The page shows them for Library duplicates, and elsewhere only when asked to.
     const inRoot = (f) => {
       const root = AUDIO_ROOTS.find((r) => f.startsWith(r + '/'));
       return root ? path.relative(path.dirname(root), f) : null;
     };
-    const paths = item.dupe && item._files
+    const paths = item._files
       ? { flac: (item._files.flac || []).map(inRoot), mp3: (item._files.mp3 || []).map(inRoot) } : undefined;
     return json(res, 200, { ...pub(item), no_mp3: item.status === 'no_mp3', ...(paths ? { paths } : {}) });
   }

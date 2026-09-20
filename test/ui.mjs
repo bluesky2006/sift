@@ -299,6 +299,17 @@ try {
   check(await page.locator('#facts tr.differ').count() === 3, 'differences are highlighted: release, year, label');
   check((await page.locator('#facts').textContent()).includes('R2 1234'), 'catalogue number from the tags');
   check(await page.locator('.tmeta .low').count() === 0 && (await page.locator('.tmeta').first().textContent()).includes('to 16.0 kHz'), 'tracks show where they stop');
+  check(await page.locator('.tpath').count() === 0, 'file paths are hidden until asked for');
+  await page.click('#more');
+  await page.click('#paths');
+  await page.waitForSelector('.tpath');
+  check((await page.locator('.tpath').allTextContents()).join('|') === 'media/a.mp3|media/a.flac'
+    && await page.evaluate(() => localStorage.getItem('sift-paths')) === 'on', 'Show file paths shows each file inside its music folder, and is remembered');
+  await page.click('#more');
+  check((await page.locator('#paths').textContent()).includes('Hide file paths'), 'the menu offers to hide them again');
+  await page.click('#paths');
+  await page.waitForSelector('.tpath', { state: 'detached' });
+  check(await page.locator('.tpath').count() === 0, 'and does');
   await page.click('#tspectra');
   await page.waitForSelector('.spec img');
   await page.waitForFunction(() => [...document.querySelectorAll('.spec img')].every((i) => i.complete && i.naturalWidth > 0), null, { timeout: 30000 }).catch(() => {});

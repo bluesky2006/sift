@@ -74,6 +74,8 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 - **Match volume** in the player turns the louder version down to the quieter one's loudness
   (Web Audio, built on the first tap that needs it).
 - **History**: every decision and what became of it, with totals.
+- **Show file paths** (⋯ menu) puts each track's path inside its music folder under it, so a
+  split or misfiled MP3 folder is plain to see. Library duplicates always show them.
 - Keyboard: Space, A, ←/→, ↑/↓, J/K, 1/2/3, Esc; `?` lists them.
 
 ## Decisions
@@ -105,8 +107,9 @@ the half-moved files back together.
 
 The browser sends album ids or a bin entry id and a decision name from a fixed list, nothing
 else. The server checks the id against `queue.json`/`bin.json` and runs `sift.py` with a
-fixed argv. Absolute file paths never leave the server (Library duplicates show each
-file's path inside its music folder, e.g. `FLAC/Artist/Album/01.flac`, and nothing outside them), and audio and spectrograms are only served
+fixed argv. Absolute file paths never leave the server (an album shows each file's path
+inside its music folder, e.g. `FLAC/Artist/Album/01.flac`, and nothing outside them: always for
+Library duplicates, elsewhere behind **Show file paths** in the ⋯ menu), and audio and spectrograms are only served
 from the four music folders (symlinks resolved first).
 
 Nothing moves unless both drives it touches are mounted: an unmounted drive's mount point is
