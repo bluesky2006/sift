@@ -242,7 +242,7 @@ async function watchJob() {
 }
 $('jobclose').onclick = () => { $('jobbar').hidden = true; };
 
-// Check now becomes the progress: a spinner and 'Checking…' while the check runs
+// Update becomes the progress: a spinner and 'Updating…' while the check runs
 let checkHtml = null;
 function checking(on) {
   const b = $('check');
@@ -250,7 +250,7 @@ function checking(on) {
   if (on === b.classList.contains('busy')) return;
   b.classList.toggle('busy', on);
   b.disabled = on;
-  b.innerHTML = on ? `<span class="spinner"></span>Checking…` : checkHtml;
+  b.innerHTML = on ? `<span class="spinner"></span>Updating…` : checkHtml;
 }
 
 // Stop playback and let go of the files before anything moves them.
