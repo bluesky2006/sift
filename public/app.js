@@ -525,11 +525,19 @@ function trackNo(tracks, t) {
   return `<span class="tnum">${n}</span>`;
 }
 
+// A truncated file decodes short; a corrupt one decodes whole with garbage where the
+// decoder lost its place, so say where rather than a full length that reads as fine.
+function damageWhere(t) {
+  if (t.decoded_s != null && t.secs && t.decoded_s < t.secs - 1) return ` · decodes to ${clock(t.decoded_s)} of ${clock(t.secs)}`;
+  const at = t.bad_at || [];
+  if (!at.length) return '';
+  return ` · corrupt near ${clock(at[0])}${at.length > 1 ? ` and ${at.length - 1} more place${at.length > 2 ? 's' : ''}` : ''}`;
+}
+
 function cell(a, side, idx, rowIdx) {
   if (idx == null) return '<div class="cell empty">—</div>';
   const t = a[side].tracks[idx];
-  const damaged = t.damaged
-    ? `<span class="badge bad">damaged${t.decoded_s != null ? ` · decodes to ${clock(t.decoded_s)} of ${clock(t.secs)}` : ''}</span>` : '';
+  const damaged = t.damaged ? `<span class="badge bad">damaged${damageWhere(t)}</span>` : '';
   return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play">${ic('play')}</button>
     <span class="ttext"><span class="ttitle">${trackNo(a[side].tracks, t)}${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
@@ -1061,7 +1069,8 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 // ---- the bin -----------------------------------------------------------------
 
 const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC', bin_album: 'Album put in the bin',
-  check: 'Check for new arrivals', adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked' };
+  check: 'Check for new arrivals', adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked',
+  strip_id3: 'ID3v1 tags cut off' };
 
 function renderBin() {
   document.title = 'Bin · Sift';

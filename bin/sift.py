@@ -10,6 +10,7 @@
     sift.py resolve-many DECISION IDS  keep_flac | keep_mp3 | refetch for ids 1,2,3, one bin entry each
     sift.py apply-staged SPEC          id:decision[:release],... approved in the app, one bin entry each
     sift.py health MINUTES             check the FLAC library for damaged or converted files, for so long
+    sift.py strip-id3 [FOLDER...]      cut ID3v1 tags off the end of intact library FLACs (undo in the bin)
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
 
     sift.py pair ID M F                MP3 track M is FLAC track F (indexes into the album)
@@ -263,6 +264,7 @@ def tracks(files, flac=False, checks=True):
         if flac and i.get("damaged"):
             t["damaged"] = True
             t["decoded_s"] = i.get("decoded_s")
+            t["bad_at"] = i.get("bad_at") or []
         if checks:
             t["cutoff"], t["lufs"] = i.get("cutoff"), i.get("lufs")
         out.append(t)
@@ -912,7 +914,7 @@ def health_items(taken):
             continue                          # changed since: the next night looks again
         iid = HEALTH_BASE + zlib.crc32(path.encode()) % 100_000_000
         artist, title = os.path.relpath(path, CONF["flac_dest"]).split(os.sep)
-        reasons = ([f"{rec['damaged']} FLAC file(s) fail flac -t"] if rec["damaged"] else []) \
+        reasons = ([f"{rec['damaged']} FLAC file(s) with damaged audio"] if rec["damaged"] else []) \
             + ["Already in the Roon FLAC library; no MP3 is involved"]
         main, sides = covers(iid, [path], files, [], [])
         key = moved.get(path)
@@ -1292,6 +1294,9 @@ def undo_ops(ops):
                 retag(o["dir"], [{"from": c["to"], "to": c["from"], "tag": c["tag_before"]}
                                  for c in o["changes"]])
                 rename_in_overrides(o["album"], {c["to"]: c["from"] for c in o["changes"]})
+            elif o["op"] == "id3v1":
+                with open(o["file"], "ab") as f:
+                    f.write(base64.b64decode(o["tag"]))
             elif o["op"] == "ledger":
                 data = fm.load_json(CONF[o["file"]], {})
                 if o["before"] is None:
@@ -1376,7 +1381,68 @@ def undo_problems(entry, entries):
                     problems.append(f"missing: {os.path.join(o['dir'], c['to'])}")
                 elif c["from"] not in tos and os.path.exists(os.path.join(o["dir"], c["from"])):
                     problems.append(f"already exists: {os.path.join(o['dir'], c['from'])}")
+        elif o["op"] == "id3v1":
+            if not os.path.isfile(o["file"]):
+                problems.append(f"missing: {o['file']}")
+            elif has_id3v1(o["file"]):
+                problems.append(f"already has a tag on the end: {o['file']}")
     return problems
+
+
+# ---- ID3v1 tags on the end of old rips ---------------------------------------------
+
+def has_id3v1(path):
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() < 128:
+            return False
+        f.seek(-128, os.SEEK_END)
+        return f.read(3) == b"TAG"
+
+
+def strip_id3(folders=None):
+    """Cut the ID3v1 tag off the end of every library FLAC that carries one and whose audio
+    matches its own header MD5. Roon ignores the tag; the reference decoder trips over it,
+    which is how these files were flagged as damaged. One bin entry per album folder holds
+    each tag, so undo puts them back byte for byte."""
+    folders = folders or [path for _, _, path in album_folders(CONF["flac_dest"])]
+    done = 0
+    for folder in folders:
+        files = [p for p in fm.folder_audio([folder]) if p.lower().endswith(".flac") and has_id3v1(p)]
+        if not files:
+            continue
+        with Lock():
+            require_mounted(mount_of(folder))
+            artist, title = (os.path.relpath(folder, CONF["flac_dest"]).split(os.sep) + ["", ""])[:2]
+            item = {"id": HEALTH_BASE + zlib.crc32(folder.encode()) % 100_000_000, "artist": artist, "title": title}
+            en = Entry("strip_id3", item)
+            for p in files:
+                r = fm.decode_check(p)
+                if not r or not r["md5_ok"]:
+                    log(f"strip-id3: left alone, audio doesn't match its header: {p}")
+                    continue
+                with open(p, "rb+") as f:
+                    f.seek(-128, os.SEEK_END)
+                    tag = f.read(128)
+                    en.d["ops"].append({"op": "id3v1", "file": p, "tag": base64.b64encode(tag).decode()})
+                    en.journal()
+                    f.seek(-128, os.SEEK_END)
+                    f.truncate()
+                fm.file_entry(p)                   # the file changed: its cache record starts over
+                done += 1
+            if not en.d["ops"]:
+                drop_journal(en.d)
+                continue
+            save_entry(en.d)
+            h = fm.load_json(HEALTH, {})
+            if h.get("albums", {}).pop(folder, None) is not None:
+                fm.save_json(HEALTH, h)            # measured again on the next health run
+            fm.save_cache()
+        log(f"strip-id3: {len(en.d['ops'])} tag(s) cut from {artist} — {title}")
+        print(f"{artist} — {title}: {len(en.d['ops'])} tag(s) cut", flush=True)
+    print(f"{done} file(s) trimmed", flush=True)
+    if done:
+        refresh_queue()
 
 
 # ---- decisions -----------------------------------------------------------------
@@ -1957,6 +2023,8 @@ def main():
             track_tool(int(a[1]), a[0], a[2:])
         elif len(a) == 3 and a[0] == "adopt":
             adopt(a[1], a[2])
+        elif a[:1] == ["strip-id3"]:
+            strip_id3(a[1:] or None)
         else:
             sys.exit(__doc__)
     except RuntimeError as e:

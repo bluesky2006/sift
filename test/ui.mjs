@@ -63,8 +63,9 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       reasons: ['No MP3 of this album to replace; every FLAC file decodes cleanly'],
       allowed: ['keep_flac', 'bin_album', 'refetch', 'watch'], watch: false,
       flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
-    { id: 800000001, artist: 'Old', title: 'Library Rip', queue: 'health', reasons: ['2 FLAC file(s) fail flac -t'], allowed: ['bin_album', 'dismiss'],
-      health: true, flac: { tracks: [t('A', 60)], seconds: 60 }, mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
+    { id: 800000001, artist: 'Old', title: 'Library Rip', queue: 'health', reasons: ['2 FLAC file(s) with damaged audio'], allowed: ['bin_album', 'dismiss'],
+      health: true, flac: { tracks: [{ ...t('A', 60), damaged: true, decoded_s: 60, bad_at: [45, 52] }, { ...t('B', 60), damaged: true, decoded_s: 20, bad_at: [20] }], seconds: 120 },
+      mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
@@ -317,6 +318,11 @@ try {
   await page.keyboard.press('Escape');
   await page.waitForTimeout(300);
   check(await page.locator('.spec').count() === 0 && await page.locator('[data-decide]').count() > 0, 'Esc leaves spectrograms');
+
+  await page.goto(BASE + '/app#/album/800000001');
+  await page.waitForSelector('.badge.bad');
+  check((await page.locator('.badge.bad').allTextContents()).join('|') === 'damaged · corrupt near 0:45 and 1 more place|damaged · decodes to 0:20 of 1:00',
+    'a corrupt file says where, a truncated one how much');
 
   await page.goto(BASE + '/app#/album/3');
   await page.waitForSelector('.tmeta');

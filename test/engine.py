@@ -811,6 +811,33 @@ S.save_health({"/y": {"sig": [1]}})
 hj = load(S.HEALTH)
 check(hj["dismissed"] == {"/x": [1, 2, 3]} and "/y" in hj["albums"], "results merge into health.json as it is on disk")
 
+print("damaged, or just an ID3v1 tag on the end")
+D = f"{MUSIC}/FLAC/Old/Rip"
+os.makedirs(D, exist_ok=True)
+raw = open(f"{M}/real.flac", "rb").read()
+tagged = raw + b"TAG" + b"Old Rip".ljust(125, b"\0")
+open(f"{D}/01.flac", "wb").write(tagged)
+cut = bytearray(raw); mid = len(cut) // 2; cut[mid:mid + 3000] = b"\0" * 3000
+open(f"{D}/02.flac", "wb").write(bytes(cut))
+open(f"{D}/03.flac", "wb").write(raw[:len(raw) * 2 // 3])
+bad = S.fm.flac_damaged([f"{D}/0{n}.flac" for n in (1, 2, 3)])
+check([os.path.basename(p) for p in bad] == ["02.flac", "03.flac"], "a tag on the end is not damage; corrupt and truncated files are")
+e2, e3 = S.fm.file_entry(f"{D}/02.flac"), S.fm.file_entry(f"{D}/03.flac")
+secs = S.fm.duration(f"{M}/real.flac")
+check(e2["decoded_s"] >= secs - 1 and e2["bad_at"] and 2 <= e2["bad_at"][0] <= 5, f"a corrupt file decodes whole and says where ({e2['bad_at']})")
+check(e3["decoded_s"] < secs - 1, "a truncated one decodes short")
+check(S.tracks([f"{D}/02.flac"], flac=True, checks=False)[0]["bad_at"] == e2["bad_at"], "and the track says so")
+json.dump({"items": []}, open(f"{STATE}/queue.json", "w"))
+r = sift("strip-id3", D)
+check(r.returncode == 0 and "1 file(s) trimmed" in r.stdout and open(f"{D}/01.flac", "rb").read() == raw
+      and open(f"{D}/02.flac", "rb").read() == bytes(cut), f"strip-id3 cuts the tag off the intact file and nothing else ({r.stdout.strip()})")
+en = load(f"{STATE}/bin.json")["entries"][-1]
+check(en["decision"] == "strip_id3" and [o["op"] for o in en["ops"]] == ["id3v1"] and en["label"] == "Old — Rip", "recorded in the bin, one entry for the album")
+check(S.fm.flac_damaged([f"{D}/01.flac"]) == [], "the trimmed file passes")
+r = sift("undo", en["id"])
+check(r.returncode == 0 and open(f"{D}/01.flac", "rb").read() == tagged, "undo puts the tag back byte for byte")
+check(sift("strip-id3", D).returncode == 0 and open(f"{D}/01.flac", "rb").read() == raw, "and it can be cut again")
+
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")
 sys.exit(1 if failures else 0)

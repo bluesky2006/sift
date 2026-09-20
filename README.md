@@ -38,6 +38,11 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 ## Checks on every album
 
 - `flac -t` on every FLAC file, and fingerprint pairing of MP3 and FLAC tracks (`flac_migrate.py`).
+  A file `flac -t` objects to is only damaged if its decoded audio fails the MD5 in its own
+  header: old rips with an ID3v1 tag stuck on the end trip the decoder after the last frame
+  with every sample intact. The track badge says where a corrupt file loses sync, or how much
+  of a truncated one decodes. `bin/sift.py strip-id3 [folder…]` cuts such tags off (one bin
+  entry per album, undoable).
 - One ffmpeg decode per file (FLAC and MP3) measures where the spectrum stops and the
   integrated loudness (EBU R128). Both are cached in `flac-check-cache.json` with the file's
   other facts. About 0.3 s a file.
@@ -127,6 +132,7 @@ python3 ~/sift/bin/sift.py check                    # re-check now
 python3 ~/sift/bin/sift.py resolve-many keep_mp3 1,2 # one decision for several albums
 python3 ~/sift/bin/sift.py apply-staged 1:keep_flac,2:refetch:0  # what Approve runs
 python3 ~/sift/bin/sift.py adopt PATH "label"       # put an existing folder in the bin
+python3 ~/sift/bin/sift.py strip-id3 [FOLDER...]    # cut ID3v1 tags off intact library FLACs
 systemctl --user restart sift
 npm test                                            # server tests, then engine tests in a sandbox
 npm run ui                                          # the page in headless Chrome
