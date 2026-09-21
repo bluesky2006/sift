@@ -79,6 +79,9 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 - **Match volume** in the player turns the louder version down to the quieter one's loudness
   (Web Audio, built on the first tap that needs it).
 - **History**: every decision and what became of it, with totals.
+- An album's header says when each side's files arrived (their newest mtime, which Lidarr's
+  import and rsync keep), Release details give the time too, and Newest first shows it on
+  each row.
 - **Show file paths** (⋯ menu) puts each track's path inside its music folder under it, so a
   split or misfiled MP3 folder is plain to see. Library duplicates always show them.
 - Keyboard: Space, A, ←/→, ↑/↓, J/K, 1/2/3, Esc; `?` lists them.

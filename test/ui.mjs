@@ -43,9 +43,9 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     { id: 2, artist: 'Other', title: 'Fine', queue: 'ready', reasons: ['Every track matches'],
       allowed: ['keep_flac', 'refetch', 'watch'], watch: true, reorder: true,
       flac: { tracks: [{ ...t('A', 60), lufs: -11, cutoff: 22050 }], seconds: 60,
-        details: { release: 'aaaaaaaa-1111-2222-3333-444444444444', date: '2012-03-01', original: '1971-05-10', label: 'Rhino', tags: { catalognumber: 'R2 1234' } } },
+        details: { release: 'aaaaaaaa-1111-2222-3333-444444444444', date: '2012-03-01', original: '1971-05-10', label: 'Rhino', imported: '2026-09-17T08:11:32', tags: { catalognumber: 'R2 1234' } } },
       mp3: { tracks: [{ ...t('A', 60), lufs: -14, cutoff: 16000 }], seconds: 60,
-        details: { release: 'bbbbbbbb-1111-2222-3333-444444444444', date: '1971-05-10', original: '1971-05-10', label: 'Cotillion', tags: {} } },
+        details: { release: 'bbbbbbbb-1111-2222-3333-444444444444', date: '1971-05-10', original: '1971-05-10', label: 'Cotillion', imported: '2019-01-12T10:00:00', tags: {} } },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false,
       _files: { flac: [path.join(MEDIA, 'a.flac')], mp3: [path.join(MEDIA, 'a.mp3')] } },
     { id: 3, artist: 'Faker', title: 'Transcode', queue: 'suspect', reasons: ['Possibly a converted MP3: 1 of 1 FLAC tracks stop around 16.0 kHz'],
@@ -298,6 +298,9 @@ try {
   check(said.includes('FLAC is the 2012 reissue; MP3 is the 1971 original.'), `details say which release is which (${said})`);
   await page.click('#facts summary');
   check(await page.locator('#facts tr.differ').count() === 3, 'differences are highlighted: release, year, label');
+  check((await page.locator('.totals').textContent()).includes('MP3 1:00 · 1 tracks · got 12 Jan 2019') && (await page.locator('.totals').textContent()).includes('FLAC 1:00 · 1 tracks · got 17 Sep 2026'),
+    'the header says when each side arrived');
+  check((await page.locator('#facts').textContent()).includes('17 Sep 2026, 08:11'), 'release details give the full date and time');
   check((await page.locator('#facts').textContent()).includes('R2 1234'), 'catalogue number from the tags');
   check(await page.locator('.tmeta .low').count() === 0 && (await page.locator('.tmeta').first().textContent()).includes('to 16.0 kHz'), 'tracks show where they stop');
   check(await page.locator('.tpath').count() === 0, 'file paths are hidden until asked for');

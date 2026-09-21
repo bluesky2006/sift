@@ -371,6 +371,12 @@ def details(inst, album_id, files):
     except Exception:
         pass
     d["tags"] = tags
+    # rsync -t and Lidarr's import keep mtimes, so the newest file is when the album arrived
+    try:
+        newest = max(os.path.getmtime(p) for p in files)
+        d["imported"] = datetime.fromtimestamp(newest).strftime("%Y-%m-%dT%H:%M:%S")
+    except (ValueError, OSError):
+        pass
     return d
 
 

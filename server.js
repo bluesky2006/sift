@@ -338,7 +338,7 @@ async function handle(req, res) {
       cover: i.cover, first_seen: i.first_seen, watch: i.watch, allowed: i.allowed,
       suspect: i.suspect || null, dupe: !!i.dupe, diagnosis: i.diagnosis || null,
       no_mp3: i.status === 'no_mp3',
-      flac: i.flac ? { n: i.flac.tracks.length, fmt: (i.flac.tracks[0] || {}).fmt || '',
+      flac: i.flac ? { n: i.flac.tracks.length, fmt: (i.flac.tracks[0] || {}).fmt || '', imported: (i.flac.details || {}).imported || null,
         damaged: i.flac.tracks.filter((t) => t.damaged).length } : null,
       mp3: i.mp3 ? { n: i.mp3.tracks.length, fmt: (i.mp3.tracks[0] || {}).fmt || '' } : null,
     }));

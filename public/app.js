@@ -126,6 +126,15 @@ function ago(iso) {
   return h < 36 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
 }
 const khz = (hz) => (hz ? `${(hz / 1000).toFixed(1)} kHz` : '–');
+// "17 Sep 2026": when a side's files arrived (their newest mtime). Own month names, since
+// the locale's short September is "Sept" on some browsers and "Sep" on others.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const day = (iso, time = false) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}${time ? `, ${pad(d.getHours())}:${pad(d.getMinutes())}` : ''}`;
+};
 const gb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
 const isNew = (i) => state.previous_check && i.first_seen > state.previous_check;
 const stagedOf = (id) => (state.staged || []).find((e) => e.id === id);
@@ -282,6 +291,7 @@ function row(i) {
   const badges = [];
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
+  if (sortBy === 'arrived' && i.flac && i.flac.imported) badges.push(`<span class="badge" title="When the FLAC arrived">got ${day(i.flac.imported)}</span>`);
   if (i.mp3) badges.push(`<span class="badge mp3">MP3 ${esc(i.mp3.fmt)} · ${i.mp3.n}</span>`);
   if (i.no_mp3) badges.push('<span class="badge warn">No MP3 to replace</span>');
   if (i.flac && i.flac.damaged) badges.push(`<span class="badge bad">${i.flac.damaged} damaged</span>`);
@@ -606,6 +616,7 @@ function spectrumPic(a, side, idx) {
 
 const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const FACTS = [
+  ['Downloaded', (d) => day(d.imported, true)],
   ['Release', (d, t) => d.title || t.album],
   ['Year', (d, t) => (d.date || t.date || '').slice(0, 4)],
   ['First released', (d, t) => (d.original || t.originaldate || '').slice(0, 4)],
@@ -649,7 +660,7 @@ function releaseFacts(a) {
   const f = F || none, m = M || none;
   const rows = FACTS.map(([label, get, link]) => {
     const fv = get(f, f.tags || {}), mv = get(m, m.tags || {});
-    const differ = F && M && fv && mv && String(fv).toLowerCase() !== String(mv).toLowerCase();
+    const differ = label !== 'Downloaded' && F && M && fv && mv && String(fv).toLowerCase() !== String(mv).toLowerCase();
     return `<tr class="${differ ? 'differ' : ''}"><th>${label}</th><td>${factValue(mv, link)}</td><td>${factValue(fv, link)}</td></tr>`;
   });
   const keys = [...new Set([...Object.keys(f.tags || {}), ...Object.keys(m.tags || {})])].filter((k) => !SHOWN_TAGS.has(k)).sort();
@@ -719,8 +730,9 @@ async function renderAlbum(id, keepMode = false) {
     <span class="muted">${near.at + 1} of ${near.of}</span>${step(near.next, 'later', `Next album${ic('next')}`)}</span>` : '';
   const watch = a.allowed.includes('watch')
     ? `<label class="switch"><input type="checkbox" role="switch" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
-  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks` : (a.health ? 'In the FLAC library' : 'No MP3'),
-    `FLAC ${clock(a.flac.seconds)} · ${a.flac.tracks.length} tracks`].join('  vs  ');
+  const got = (side) => { const d = day(((a[side] || {}).details || {}).imported); return d ? ` · got ${d}` : ''; };
+  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks${got('mp3')}` : (a.health ? 'In the FLAC library' : 'No MP3'),
+    `FLAC ${clock(a.flac.seconds)} · ${a.flac.tracks.length} tracks${got('flac')}`].join('  vs  ');
 
   view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a>${pager}</div>
     <div class="ahead">
