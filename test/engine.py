@@ -945,6 +945,22 @@ check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Resume/Alb")) 
       and not os.path.exists(f"{MUSIC}/FLAC/Resume") and load(f"{STATE}/bin.json")["entries"] == [],
       "Undo again finishes it, where it used to refuse")
 
+print("files that change after the check")
+tone(f"{DATA}/music-flac/Changed/Alb/01.flac", "flac")
+tone(f"{MUSIC}/MP3/Changed/Alb/01.mp3", "libmp3lame")
+changed = {**busy, "id": 34, "artist": "Changed", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Changed/Alb",
+           "dest": f"{MUSIC}/FLAC/Changed/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Changed/Alb"], "mp3_id": 35, "mbid": "mb-34"}}
+changed["_do"]["files_sig"] = S.files_sig(changed["_do"])
+json.dump({"items": [changed]}, open(f"{STATE}/queue.json", "w"))
+tone(f"{DATA}/music-flac/Changed/Alb/02.flac", "flac")                   # Soularr drops in another track
+r = sift("resolve", "34", "keep_flac", ok=False)
+check(r.returncode != 0 and "changed since" in r.stdout + r.stderr and os.path.isdir(f"{DATA}/music-flac/Changed/Alb")
+      and not os.path.exists(f"{MUSIC}/FLAC/Changed"), "a decision on files that changed since the check is refused")
+changed["_do"]["files_sig"] = S.files_sig(changed["_do"])
+json.dump({"items": [changed]}, open(f"{STATE}/queue.json", "w"))
+check(sift("resolve", "34", "keep_flac").returncode == 0 and os.path.isfile(f"{MUSIC}/FLAC/Changed/Alb/02.flac"),
+      "and goes ahead once checked again")
+
 print("health with the library missing")
 json.dump({"albums": {f"{MUSIC}/FLAC/Well/Fine": {"sig": [1]}}}, open(S.HEALTH, "w"))
 S.CONF["check_mounts"] = True

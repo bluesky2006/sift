@@ -1063,9 +1063,21 @@ def build_queue():
     items += health_items(taken | {i["_do"]["flac_dir"] for i in dupes})
     for i in items:
         apply_overrides(i, ov.get(str(i["id"])))
+        i["_do"]["files_sig"] = files_sig(i["_do"])
     add_sources(items)
     fm.save_cache()
     return items
+
+
+def files_sig(do):
+    """What the album's audio files were when checked: which ones, their sizes and times.
+    decide() compares it, so nothing acts on files that changed since."""
+    dirs = [d for d in (do.get("flac_dir"), do.get("hold"), *do.get("mp3_dirs", [])) if d]
+    try:
+        facts = [(p, st.st_size, st.st_mtime_ns) for p in fm.folder_audio(dirs) for st in [os.stat(p)]]
+    except OSError:
+        return None                               # moving under us: the next check sees it settled
+    return hashlib.sha1(json.dumps(facts).encode()).hexdigest()
 
 
 def write_queue(items, checked=False):
@@ -1870,6 +1882,9 @@ def watch(item, on):
 def decide(item, decision):
     if decision not in item["allowed"]:
         raise RuntimeError(f"{decision} is not available for this album")
+    sig = item["_do"].get("files_sig")
+    if sig and files_sig(item["_do"]) != sig:
+        raise RuntimeError("its files have changed since they were checked: press Update, then decide again")
     en = Entry(decision, item)
     table = {"dupe": DUPE_DECISIONS, "health": {"bin_album": health_bin, "refetch": health_refetch}}.get(item["_do"].get("kind"), DECISIONS)
     try:
