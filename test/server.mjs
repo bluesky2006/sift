@@ -264,6 +264,12 @@ try {
     'guesses sent all at once still stop at the limit');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'wrong-password-here' }, csrf: csrf2 })).status === 429,
     'and the password re-ask for emptying shares the lockout');
+  const { createRequire } = await import('node:module');
+  const lock = createRequire(import.meta.url)('../lib/auth.js');
+  for (let i = 0; i < 10; i++) lock.startAttempt('100.64.0.9');
+  check(!lock.startAttempt('100.64.0.9') && lock.startAttempt('100.64.0.2'), 'one device guessing doesn\'t lock out another');
+  for (let i = 0; i < 60; i++) lock.startAttempt(`100.64.1.${i}`);
+  check(!lock.startAttempt('100.64.0.3'), 'but many devices together still hit a limit');
 
   console.log('a damaged auth.json');
   fs.writeFileSync(path.join(T, 'auth.json'), '{"salt": "half-writ');

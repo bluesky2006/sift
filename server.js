@@ -321,14 +321,14 @@ async function handle(req, res) {
     return json(res, 200, { ok: true }, { 'Set-Cookie': cookie(auth.makeSession(created)) });
   }
   if (p === '/api/auth/login' && req.method === 'POST') {
-    if (!auth.startAttempt()) return json(res, 429, { error: 'too many attempts, wait 5 minutes' });
+    if (!auth.startAttempt(req.socket.remoteAddress)) return json(res, 429, { error: 'too many attempts, wait 5 minutes' });
     const body = await readBody(req);
     await new Promise((r) => setTimeout(r, 500));
     if (!a || typeof body.password !== 'string' || !auth.verifyPassword(body.password, a)) {
       audit({ event: 'login-failed', ip: req.socket.remoteAddress });
       return json(res, 401, { error: 'wrong password' });
     }
-    auth.clearFailures();
+    auth.clearFailures(req.socket.remoteAddress);
     audit({ event: 'login', ip: req.socket.remoteAddress });
     return json(res, 200, { ok: true }, { 'Set-Cookie': cookie(auth.makeSession(a)) });
   }
@@ -571,13 +571,13 @@ async function handle(req, res) {
     if (p === '/api/bin/empty') {
       // the one delete in the app: CSRF plus the password again at press time, which
       // shares the sign-in lockout so a stolen session can't guess the password
-      if (!auth.startAttempt()) return json(res, 429, { error: 'too many attempts, wait 5 minutes' });
+      if (!auth.startAttempt(req.socket.remoteAddress)) return json(res, 429, { error: 'too many attempts, wait 5 minutes' });
       await new Promise((r) => setTimeout(r, 500));
       if (typeof body.password !== 'string' || !auth.verifyPassword(body.password, a)) {
         audit({ event: 'empty-denied', ip: req.socket.remoteAddress });
         return json(res, 401, { error: 'wrong password' });
       }
-      auth.clearFailures();
+      auth.clearFailures(req.socket.remoteAddress);
       const days = (await readState('settings.json', {})).retention_days;
       if (body.older && !days) return json(res, 400, { error: 'no retention set' });
       audit({ event: 'empty-bin', older: body.older ? days : undefined });
