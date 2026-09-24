@@ -108,25 +108,32 @@ const pub = (v) => Array.isArray(v) ? v.map(pub)
   : v;
 
 // Engine output quotes the paths it failed on. Those stay in audit.log; the browser gets
-// "…" in their place, quoted or not.
+// "…" in their place, quoted or not. Python quotes a path holding an apostrophe in double
+// quotes ("…/Guns N' Roses/…"), so each kind of quote is taken on its own.
 const scrub = (text) => String(text || '')
-  .replace(/(['"])[^'"\n]*\/[^'"\n]*\1/g, '$1…$1')
-  .replace(/(^|[\s(=])\/[^\n;()]*?(?=: |:$|,? \(|;|\)|\n|$)/gm, '$1…');
+  .replace(/"[^"\n]*\/[^"\n]*"/g, '"…"')
+  .replace(/'[^'\n]*\/[^'\n]*'/g, "'…'")
+  .replace(/(^|[\s(=:])\/[^\n;()]*?(?=: |:$|,? \(|;|\)|\n|$)/gm, '$1…');
 const jobView = (j) => j && { kind: j.kind, label: j.label, done: j.done, ok: j.ok, output: scrub(j.output) };
 
 // ---- staging ---------------------------------------------------------------
-// Album decisions are staged, not run: staged.json holds { id, decision, release, at } per
-// album until they are approved. The server is its only writer; approving takes the
+// Album decisions are staged, not run: staged.json holds { id, decision, release, mbid, at }
+// per album until they are approved. The server is its only writer; approving takes the
 // entries out before the engine starts on them.
 const STAGEABLE = new Set(['keep_flac', 'keep_mp3', 'refetch', 'bin_album']);
 async function readStaged(q) {
   const s = await readState('staged.json', { entries: [] });
   // an album decided elsewhere, gone from the queue or no longer allowing the decision drops out
-  return s.entries.filter((e) => {
+  return s.entries.map((e) => {
     const item = q.items.find((i) => i.id === e.id);
-    return item && item.queue !== 'arriving' && item.allowed.includes(e.decision)
-      && (e.release == null || e.release < (item.releases || []).length);
-  });
+    if (!item || item.queue === 'arriving' || !item.allowed.includes(e.decision)) return null;
+    if (e.release == null) return e;
+    const releases = item.releases || [];
+    // the release is kept by its MBID: a check since may have reordered the list, and the
+    // index is only where it sits now. One no longer listed drops out.
+    const at = e.mbid ? releases.findIndex((r) => r.release === e.mbid) : e.release;
+    return at >= 0 && at < releases.length ? { ...e, release: at } : null;
+  }).filter(Boolean);
 }
 async function writeStaged(entries) {
   await fsp.writeFile(path.join(STATE, 'staged.json.tmp'), JSON.stringify({ entries }));
@@ -140,7 +147,9 @@ const stage = (q, adds) => withStaged(async () => {
   const ids = new Set(adds.map((e) => e.id));
   const kept = (await readStaged(q)).filter((e) => !ids.has(e.id));
   const at = new Date().toISOString();
-  await writeStaged([...kept, ...adds.map((e) => ({ id: e.id, decision: e.decision, release: e.release ?? null, at }))]);
+  const mbid = (e) => e.release == null ? null
+    : ((q.items.find((i) => i.id === e.id) || {}).releases || [])[e.release]?.release ?? null;
+  await writeStaged([...kept, ...adds.map((e) => ({ id: e.id, decision: e.decision, release: e.release ?? null, mbid: mbid(e), at }))]);
 });
 
 // ---- jobs ------------------------------------------------------------------
@@ -218,9 +227,13 @@ async function spectrum(file) {
   const name = crypto.createHash('sha1').update(`${real}|${st.size}|${st.mtimeMs}`).digest('hex') + '.png';
   const out = path.join(SPECTRA, name);
   await fsp.mkdir(SPECTRA, { recursive: true });
-  if (fs.existsSync(out)) return out;
+  if (fs.existsSync(out)) {
+    fsp.utimes(out, new Date(), new Date()).catch(() => {});   // looked at, so the prune keeps it
+    return out;
+  }
   if (drawing.has(name)) return drawing.get(name).promise;
   if (job && !job.done) return null;
+  if (waiting.length >= 50) return null;              // someone is scrolling faster than ffmpeg
   const d = { child: null };
   d.promise = (async () => {
     if (running >= 3) await new Promise((go) => waiting.push(go));
@@ -594,6 +607,18 @@ async function handle(req, res) {
 // ---- start -----------------------------------------------------------------
 
 fs.mkdirSync(STATE, { recursive: true });
+
+// spectrograms are only a cache: drop any not looked at in 30 days, at start and daily
+async function pruneSpectra() {
+  const cut = Date.now() - 30 * 86400000;
+  for (const name of await fsp.readdir(SPECTRA).catch(() => [])) {
+    const p = path.join(SPECTRA, name);
+    const st = await fsp.stat(p).catch(() => null);
+    if (st && st.isFile() && st.mtimeMs < cut) await fsp.unlink(p).catch(() => {});
+  }
+}
+pruneSpectra();
+setInterval(pruneSpectra, 86400000).unref();
 for (const host of HOSTS) {
   http.createServer((req, res) => {
     handle(req, res).catch((e) => {

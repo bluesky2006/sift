@@ -4,6 +4,7 @@
 // /usr/bin/google-chrome, as Switchboard's ui test does.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,6 +74,17 @@ fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
   { id: 'e0', at: '2026-01-01T00:00:00Z', decision: 'keep_flac', label: 'Old — One', bytes: 2e9, ops: [] },
   { id: 'e1', at: new Date().toISOString(), decision: 'reorder', label: 'Band — Record', bytes: 0, ops: [] }] }));
 
+// a server already on the port (another run) would answer in our place, and every check
+// would be made against it
+const taken = await new Promise((ok) => {
+  const sock = net.connect(PORT, '127.0.0.1', () => { sock.destroy(); ok(true); });
+  sock.on('error', () => ok(false));
+});
+if (taken) {
+  console.error(`port ${PORT} is already in use, perhaps by another test run`);
+  fs.rmSync(T, { recursive: true, force: true });
+  process.exit(1);
+}
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
     SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_AUDIO_ROOTS: MEDIA },
@@ -212,6 +224,14 @@ try {
   await page.waitForTimeout(1500);
   check(calls().some((c) => c.endsWith('unpair 1 2')), 'which forgets it');
   fs.writeFileSync(queueFile, unpaired);
+
+  console.log('status pills');
+  await page.goto(BASE + '/app#/album/1');
+  await page.waitForSelector('.tracks');
+  await page.locator('#status [data-goto]').first().click();
+  await page.waitForSelector('.queue');
+  check(await page.evaluate(() => location.hash) === '#/' && await page.evaluate(() => album) === null,
+    'a status pill leaves the open album properly, so its keys stop acting on it');
 
   console.log('a job the server forgets');
   await page.route('**/api/job', (r) => r.fulfill({ contentType: 'application/json', body: '{"job":null}' }));

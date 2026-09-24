@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,8 +54,23 @@ fs.writeFileSync(path.join(STATE, 'history.json'), JSON.stringify({
   emptied: [{ at: '2026-09-12T10:00:00', bytes: 5e9, entries: [{ id: 'e1', at: '2026-09-09T10:00:00', decision: 'keep_mp3', label: 'Gone — Album', bytes: 5e9 }] }],
   undone: [{ id: 'u1', at: '2026-09-08T10:00:00', decision: 'keep_flac', label: 'Undone — Album', undone: '2026-09-08T11:00:00' }],
 }));
-fs.writeFileSync(path.join(STATE, 'audit.log'), JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', label: 'Broke — Album', ok: false, output: "rsync '/secret/music/Broke/Album': (2 left)\n" }) + '\n');
+fs.writeFileSync(path.join(STATE, 'audit.log'), [
+  { label: 'Broke — Album', output: "rsync '/secret/music/Broke/Album': (2 left)\n" },
+  { label: 'Guns — Appetite', output: "File exists: \"/secret/Guns N' Roses/Appetite\"\n" },
+  { label: 'Dst — Path', output: 'rsync dst:/secret/dst/x failed\n' },
+].map((e) => JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', ok: false, ...e }) + '\n').join(''));
 
+// a server already on the port (another run) would answer in our place, and every check
+// would be made against it
+const taken = await new Promise((ok) => {
+  const sock = net.connect(PORT, '127.0.0.1', () => { sock.destroy(); ok(true); });
+  sock.on('error', () => ok(false));
+});
+if (taken) {
+  console.error(`port ${PORT} is already in use, perhaps by another test run`);
+  fs.rmSync(T, { recursive: true, force: true });
+  process.exit(1);
+}
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
     SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_AUDIO_ROOTS: MUSIC },
@@ -86,6 +102,7 @@ try {
   check((await req('/api/state')).status === 401, 'state needs a session');
   check((await req('/api/audio/1/flac/0')).status === 401, 'audio needs a session');
   check((await req('/app')).status === 302, 'app redirects to sign-in');
+  check((await req('/api/state', { headers: { Cookie: 'sift_sid=%' } })).status === 401, 'a malformed cookie is no session, not a server error');
 
   console.log('password');
   check((await req('/api/auth/setup', { method: 'POST', body: { password: 'a-long-evil-password' }, headers: { 'Content-Type': 'text/plain' } })).status === 403,
@@ -127,7 +144,10 @@ try {
     `history joins the bin, what left it and failed jobs (${outcomes.join(', ')})`);
   check(hist.totals.flac === 1 && hist.totals.mp3 === 1 && hist.totals.freed === 5e9, 'totals count the bin and emptied, not undone');
   check(!JSON.stringify(hist).includes('/secret'), 'history carries no paths');
-  check(hist.events.find((e) => e.outcome === 'failed').error === "rsync '…': (2 left)", 'a failed job says why, without the path');
+  const why = (label) => hist.events.find((e) => e.label === label).error;
+  check(why('Broke — Album') === "rsync '…': (2 left)", 'a failed job says why, without the path');
+  check(why('Guns — Appetite') === 'File exists: "…"' && why('Dst — Path') === 'rsync dst:…',
+    `with a double-quoted path holding an apostrophe, or one straight after a colon (${why('Guns — Appetite')} | ${why('Dst — Path')})`);
 
   console.log('spectrograms');
   let sp = await req('/api/spectrum/2/flac/0');
@@ -204,14 +224,22 @@ try {
   check((await req('/api/unstage', { method: 'POST', body: { ids: ['2'] }, csrf })).status === 400, 'unstage takes integer ids');
   check((await req('/api/unstage', { method: 'POST', body: { ids: [2] }, csrf })).status === 200
     && (await stagedNow()).map((e) => e.id).join() === '1', 'unstaging drops just that album');
-  await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf });
+  await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'refetch', release: 1 }, csrf });   // release 'y'
+  // a check rebuilds the queue and Lidarr lists the releases in another order: 'y' is first now
+  const queueFile = path.join(STATE, 'queue.json');
+  const queueBefore = fs.readFileSync(queueFile, 'utf8');
+  const reordered = JSON.parse(queueBefore);
+  reordered.items.find((i) => i.id === 2).releases = [{ release: 'y' }, { release: 'z' }, { release: 'x' }];
+  fs.writeFileSync(queueFile, JSON.stringify(reordered));
   check((await req('/api/apply-staged', { method: 'POST', body: { ids: [1] } })).status === 403, 'approving needs CSRF');
   check((await req('/api/apply-staged', { method: 'POST', body: { ids: [99] }, csrf })).status === 400, 'approving something not staged is refused');
   check((await req('/api/apply-staged', { method: 'POST', body: { ids: [2, '1; ls'] }, csrf })).status === 400, 'approve takes integer ids');
   r = await req('/api/apply-staged', { method: 'POST', body: { ids: [2, 1] }, csrf });
   check(r.status === 202 && (await r.json()).n === 2, 'approving starts one job');
   await new Promise((res) => setTimeout(res, 1500));
-  check(/apply-staged (1:keep_flac,2:refetch:1|2:refetch:1,1:keep_flac)$/.test(lastCall()), `the engine gets what was staged, from the server (${lastCall()})`);
+  check(/apply-staged (1:keep_flac,2:refetch:0|2:refetch:0,1:keep_flac)$/.test(lastCall()),
+    `the engine gets what was staged, from the server, with the release found by its id where it sits now (${lastCall()})`);
+  fs.writeFileSync(queueFile, queueBefore);
   check((await stagedNow()).length === 0, 'and the staged list is empty');
 
   console.log('track tools');

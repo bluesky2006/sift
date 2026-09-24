@@ -6,6 +6,13 @@
 const $ = (id) => document.getElementById(id);
 const view = $('view');
 
+// the player and the Select bar dock at the foot of the page; keep room for them both,
+// however tall they wrap, so the last rows can always be scrolled clear
+const dock = document.querySelector('.dock');
+new ResizeObserver(() => {
+  document.body.style.paddingBottom = `calc(${Math.max(128, dock.offsetHeight + 24)}px + env(safe-area-inset-bottom))`;
+}).observe(dock);
+
 const QUEUES = [
   ['staged', 'Staged', "Decisions waiting for your approval. Nothing has moved yet. Untick any you're unsure of, then approve the rest."],
   ['ready', 'Ready', 'Exact matches: every track matches the MP3 by fingerprint and every FLAC file decodes cleanly. '
@@ -196,7 +203,13 @@ function renderStatus() {
     + stat(items.length - ready - staged, 'to review')
     + (staged ? stat(staged, 'staged', 'staged') : '');
   $('status').querySelectorAll('[data-goto]').forEach((b) => {
-    b.onclick = () => { tab = b.dataset.goto; localStorage.setItem('sift-tab', tab); renderList(); window.scrollTo(0, 0); };
+    b.onclick = () => {
+      tab = b.dataset.goto;
+      localStorage.setItem('sift-tab', tab);
+      // through the hash, so an open album is left properly and its keys stop acting on it
+      if ((location.hash || '#/') !== '#/') location.hash = '#/';
+      else { renderList(); window.scrollTo(0, 0); }
+    };
   });
   $('binlink').textContent = state.bin.length ? `Bin (${gb(binBytes)})` : 'Bin';
 }
@@ -574,7 +587,7 @@ function cell(a, side, idx, rowIdx) {
   if (idx == null) return '<div class="cell empty">—</div>';
   const t = a[side].tracks[idx];
   const damaged = t.damaged ? `<span class="badge bad">damaged${damageWhere(t)}</span>` : '';
-  return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play">${ic('play')}</button>
+  return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play the ${side === 'flac' ? 'FLAC' : 'MP3'} of ${esc(t.title || t.name)}">${ic('play')}</button>
     <span class="ttext"><span class="ttitle">${trackNo(a[side].tracks, t)}${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
       ? ` · <span class="${side === 'flac' && t.cutoff < SUSPECT_HZ ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
@@ -723,9 +736,11 @@ function orderTable(a) {
 async function renderAlbum(id, keepMode = false) {
   let a;
   try { a = await api(`/api/album/${id}`); } catch {
+    if (location.hash !== `#/album/${id}`) return;
     view.innerHTML = '<p class="empty">This album is no longer in the queue. <a href="#/">Back to the list</a></p>';
     return;
   }
+  if (location.hash !== `#/album/${id}`) return;       // left while it loaded: don't draw over where we are
   if (!keepMode || !album || album.id !== a.id) { mode = 'view'; picked = null; }
   album = { ...a, rows: buildRows(a) };
   if (mode === 'order' && (!pending || pending.length !== a.flac.tracks.length)) pending = a.flac.tracks.map((_, k) => k);
@@ -842,7 +857,8 @@ async function renderAlbum(id, keepMode = false) {
       await api('/api/track', { id: a.id, ...body });
       const job = await watchJob();
       if (note && job && job.ok) toast(note);
-    } catch (e) { toast(e.message); }
+      return job;
+    } catch (e) { toast(e.message); return null; }
   };
   const tool0 = async (url, body, note) => {
     try {
@@ -883,7 +899,9 @@ async function renderAlbum(id, keepMode = false) {
     if (await ask({ title: 'Save the new order?', ok: 'Save order',
       body: 'The FLAC files get new track numbers and filenames in this order. You can undo it from the bin.' })) {
       mode = 'view';
-      tool({ tool: 'reorder', order: pending }, 'Tracks renumbered. Undo is in the bin.');
+      const job = await tool({ tool: 'reorder', order: pending }, 'Tracks renumbered. Undo is in the bin.');
+      // refused or failed: back to the edit, as it was
+      if ((!job || !job.ok) && location.hash === `#/album/${a.id}`) { mode = 'order'; renderAlbum(a.id, true); }
     }
   });
   view.querySelectorAll('[data-up],[data-down]').forEach((b) => {
@@ -1159,6 +1177,7 @@ function renderBin() {
       if (pw == null) return;
       try { await api('/api/bin/empty', { password: pw, older }); watchJob(); return; } catch (e) {
         if (e.status !== 401) { toast(e.message); return; }
+        if (e.message === 'not signed in') { location.href = '/'; return; }   // the session ran out
         error = 'Wrong password';
       }
     }
@@ -1170,8 +1189,9 @@ function renderBin() {
 // ---- history -----------------------------------------------------------------
 
 const OUTCOME = { bin: ['In the bin', ''], undone: ['Undone', 'muted'], emptied: ['Deleted for good', ''], failed: ['Failed', 'bad'] };
-const DECIDED_MANY = { 'approve-ready': 'Approve all ready', check: 'Check', undo: 'Undo', 'empty-bin': 'Empty bin',
-  pair: 'Pair tracks', unpair: 'Forget a pair', one_album: 'One album' };
+const DECIDED_MANY = { 'apply-staged': 'Approve staged', check: 'Check', undo: 'Undo', 'empty-bin': 'Empty bin',
+  pair: 'Pair tracks', unpair: 'Forget a pair', one_album: 'One album', watch_on: 'Watch for a better FLAC',
+  watch_off: 'Stop watching', dismiss: 'Looks fine' };
 
 async function renderHistory() {
   document.title = 'History · Sift';
@@ -1229,7 +1249,11 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === ' ' && playing) { ev.preventDefault(); $('pp').onclick(); }
   else if ((ev.key === 'a' || ev.key === 'A') && playing) { if (!$('ab').disabled) $('ab').onclick(); }
   else if (ev.key === 'ArrowLeft' && playing) { ev.preventDefault(); active.currentTime = Math.max(0, active.currentTime - 10); }
-  else if (ev.key === 'ArrowRight' && playing) { ev.preventDefault(); active.currentTime = Math.min(active.duration || 0, active.currentTime + 10); }
+  else if (ev.key === 'ArrowRight' && playing) {
+    ev.preventDefault();
+    // before its length is known, skip ahead anyway rather than back to the start
+    active.currentTime = Number.isFinite(active.duration) ? Math.min(active.duration, active.currentTime + 10) : active.currentTime + 10;
+  }
   else if ((ev.key === 'ArrowDown' || ev.key === 'ArrowUp') && onAlbum && mode !== 'order') {
     ev.preventDefault();
     keyRows(ev.key === 'ArrowDown' ? 1 : -1);

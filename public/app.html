@@ -45,7 +45,7 @@
       <button id="pnext" class="skip" aria-label="Next track" title="Next track (↓)" data-icon="skip"></button>
       <div class="pinfo">
         <div class="plabel"><span class="side" id="pside"></span><span id="ptitle"></span></div>
-        <div class="pbar"><span id="ptime">0:00</span><input type="range" id="seek" min="0" max="0" step="0.1" value="0"><span id="plen">0:00</span></div>
+        <div class="pbar"><span id="ptime">0:00</span><input type="range" id="seek" min="0" max="0" step="0.1" value="0" aria-label="Position in the track"><span id="plen">0:00</span></div>
         <div class="pextra"><label class="mini"><input type="checkbox" id="match">Match volume</label><span id="pdiff"></span></div>
       </div>
       <button id="ab" class="ab" title="Same moment in the other version" data-icon="ab">A/B</button>
@@ -91,7 +91,7 @@
       <div class="dbuttons"><button value="ok" class="primary">Close</button></div>
     </form>
   </dialog>
-  <div class="toast" id="toast" hidden></div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <script src="/app.js"></script>
 </body>
 </html>

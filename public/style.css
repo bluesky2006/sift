@@ -375,3 +375,9 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .play.loading::after, .round.loading::after, .spinner { animation: spin 2s linear infinite !important; }
 }
+
+/* an invisible hit area round the small controls, so each is about 44px to a finger
+   without changing how anything looks */
+.play, .skip, .unpair, .arrows button, button.stat { position: relative; }
+.play::before, .skip::before, .arrows button::before, button.stat::before { content: ""; position: absolute; inset: -8px; }
+.unpair::before { content: ""; position: absolute; inset: -12px; }

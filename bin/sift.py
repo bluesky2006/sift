@@ -941,9 +941,11 @@ def health(minutes):
         # health has open; it waits for this one album at most
         with Lock():
             try:
-                files = fm.folder_audio([path]) if os.path.isdir(path) else []
-                if not files:
+                if not os.path.isdir(path):
                     continue
+                # a folder with no audio (a stray ._.DS_Store) is recorded too, as zero
+                # tracks, or it would come first every night as never checked
+                files = fm.folder_audio([path])
                 sig = folder_sig(files)
                 if albums.get(path, {}).get("sig") == sig:
                     continue

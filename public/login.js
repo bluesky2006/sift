@@ -12,6 +12,7 @@ fetch('/api/auth/status').then((r) => r.json()).then((s) => {
 });
 
 async function submit() {
+  if ($('go').disabled) return;          // Enter again while the first is still being checked
   const err = $('error');
   err.hidden = true;
   $('go').disabled = true;

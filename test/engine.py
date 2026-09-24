@@ -676,9 +676,13 @@ for n in (1, 2):
     shutil.copy(f"{M}/fake.flac", f"{MUSIC}/FLAC/Fake/Copy/0{n}.flac")
 for x in ("Art", "Art3", "Busy", "Stuck", "Tools", "Dupe Band", "Solo"):
     shutil.rmtree(f"{MUSIC}/FLAC/{x}", ignore_errors=True)
+os.makedirs(f"{MUSIC}/FLAC/Stray/Empty", exist_ok=True); open(f"{MUSIC}/FLAC/Stray/Empty/._.DS_Store", "w").write("x")
 S.health(5)
 hr = load(S.HEALTH)["albums"]
 check(hr[f"{MUSIC}/FLAC/Fake/Copy"]["low"] == 2 and hr[f"{MUSIC}/FLAC/Well/Fine"]["low"] == 0, "the nightly check measures every album folder")
+check(hr.get(f"{MUSIC}/FLAC/Stray/Empty", {}).get("tracks") == 0 and S.health_items(set()) and
+      all(i["title"] != "Empty" for i in S.health_items(set())), "a folder with no audio is recorded, not retried every night, and never flagged")
+shutil.rmtree(f"{MUSIC}/FLAC/Stray")
 hi = S.health_items(set())
 check([i["title"] for i in hi] == ["Copy"] and hi[0]["queue"] == "health" and hi[0]["suspect"], "only the suspect one comes up in Library health")
 check(S.health_items({f"{MUSIC}/FLAC/Fake/Copy"}) == [], "not if another queue already covers the folder")

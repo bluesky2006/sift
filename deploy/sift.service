@@ -9,6 +9,9 @@ Environment=PORT=8305
 # Loopback plus the tailnet address. Never 0.0.0.0, same as Switchboard.
 Environment=HOSTS=127.0.0.1,100.70.110.7
 ExecStart=/home/simon/.nvm/versions/node/v22.23.2/bin/node /home/simon/sift/server.js
+# Nothing Sift runs needs sudo, and simon has NOPASSWD entries for Switchboard's
+# commands: a hole in the app never reaches them
+NoNewPrivileges=yes
 Restart=always
 RestartSec=3
 
