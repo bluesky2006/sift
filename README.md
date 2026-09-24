@@ -111,7 +111,14 @@ Undo checks everything first and changes nothing if it can't finish: a file alre
 place, a drive not mounted, or a later decision on the same album still in the bin (undo that
 one first). Each step of a decision is written to `pending/` as it starts, so one cut off by a
 restart or crash lands in the bin marked *interrupted* the next time Sift runs, and Undo puts
-the half-moved files back together.
+the half-moved files back together. So does a failed decision whose rollback couldn't put
+everything back, marked *rollback incomplete*. An undo that stops partway records each step it
+finished, and Undo again carries on from there.
+
+A decision is refused if the album's audio files changed since they were checked (Soularr
+replaced them, say): the album is skipped and named, and **Update** checks it again.
+`bin.json` and the ledgers are never treated as empty when they won't parse: every job stops
+until the file is fixed or restored.
 
 ## Safety
 
