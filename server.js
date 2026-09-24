@@ -284,6 +284,13 @@ async function history() {
 // Only our own addresses, so a page on another name that rebinds to us gets nowhere
 const HOST_OK = new Set(HOSTS.flatMap((h) => [`${h}:${PORT}`]).concat(`localhost:${PORT}`));
 
+const ownJson = (req) => {
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  const origin = req.headers.origin;
+  return type === 'application/json'
+    && (origin === undefined || [...HOST_OK].some((h) => origin === `http://${h}`));
+};
+
 async function handle(req, res) {
   if (!HOST_OK.has(String(req.headers.host || '').toLowerCase())) return send(res, 421, 'wrong host');
   const url = new URL(req.url, 'http://localhost');
@@ -297,6 +304,11 @@ async function handle(req, res) {
   if (p === '/app') return authed ? serveStatic(res, 'app.html') : send(res, 302, '', { Location: '/' });
 
   if (p === '/api/auth/status') return json(res, 200, { configured: !!a, authed });
+  // Sign-in and setup take JSON from our own pages only. A form or no-cors fetch from another
+  // site can't send application/json, so it can't use up the lockout or race setup.
+  if ((p === '/api/auth/setup' || p === '/api/auth/login') && req.method === 'POST' && !ownJson(req)) {
+    return json(res, 403, { error: 'refused' });
+  }
   if (p === '/api/auth/setup' && req.method === 'POST') {
     if (a) return json(res, 409, { error: 'already configured' });
     const body = await readBody(req);
@@ -304,6 +316,7 @@ async function handle(req, res) {
       return json(res, 400, { error: 'password must be at least 12 characters' });
     }
     const created = await auth.setPassword(body.password);
+    if (!created) return json(res, 409, { error: 'already configured' });
     audit({ event: 'setup' });
     return json(res, 200, { ok: true }, { 'Set-Cookie': cookie(auth.makeSession(created)) });
   }

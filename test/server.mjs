@@ -88,6 +88,10 @@ try {
   check((await req('/app')).status === 302, 'app redirects to sign-in');
 
   console.log('password');
+  check((await req('/api/auth/setup', { method: 'POST', body: { password: 'a-long-evil-password' }, headers: { 'Content-Type': 'text/plain' } })).status === 403,
+    'setup refuses a body that is not JSON, as a form on another site would send');
+  check((await req('/api/auth/setup', { method: 'POST', body: { password: 'a-long-evil-password' }, headers: { Origin: 'http://evil.example' } })).status === 403,
+    'and one from another origin');
   check((await req('/api/auth/setup', { method: 'POST', body: { password: 'short' } })).status === 400, 'short password refused');
   check((await req('/api/auth/setup', { method: 'POST', body: { password: 'a-long-test-password' } })).status === 200, 'first setup works');
   jar = '';
@@ -247,12 +251,26 @@ try {
   const csrf2 = (await (await req('/api/csrf')).json()).csrf;
 
   console.log('lockout');
+  const signedIn = jar;
+  const foreign = await Promise.all(Array.from({ length: 15 }, () =>
+    req('/api/auth/login', { method: 'POST', body: { password: 'wrong-password-here' }, headers: { 'Content-Type': 'text/plain' } })));
+  check(foreign.every((r) => r.status === 403)
+    && (await req('/api/auth/login', { method: 'POST', body: { password: 'a-long-test-password' } })).status === 200,
+    'sign-ins another site sends are refused, and don\'t use up the lockout');
+  jar = signedIn;
   const burst = await Promise.all(Array.from({ length: 30 }, () =>
     req('/api/auth/login', { method: 'POST', body: { password: 'wrong-password-here' } })));
   check(burst.filter((r) => r.status === 401).length <= 10 && burst.some((r) => r.status === 429),
     'guesses sent all at once still stop at the limit');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'wrong-password-here' }, csrf: csrf2 })).status === 429,
     'and the password re-ask for emptying shares the lockout');
+
+  console.log('a damaged auth.json');
+  fs.writeFileSync(path.join(T, 'auth.json'), '{"salt": "half-writ');
+  check((await req('/api/auth/status')).status === 500
+    && (await req('/api/auth/setup', { method: 'POST', body: { password: 'a-long-evil-password' } })).status === 500
+    && fs.readFileSync(path.join(T, 'auth.json'), 'utf8') === '{"salt": "half-writ',
+    'fails closed: setup does not reopen');
 
 } finally {
   server.kill();

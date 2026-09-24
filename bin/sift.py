@@ -910,6 +910,8 @@ def folder_sig(files):
 
 
 def health(minutes):
+    # unmounted, the library is an empty folder, and every album would drop out of health.json
+    require_mounted(mount_of(CONF["flac_dest"]))
     guard = open(os.path.join(STATE, "health.lock"), "w")
     try:
         fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -919,6 +921,8 @@ def health(minutes):
     stop = time.time() + minutes * 60
     albums = fm.load_json(HEALTH, {}).get("albums", {})
     folders = [path for _, _, path in album_folders(CONF["flac_dest"])]
+    if albums and not folders:
+        raise RuntimeError(f"refusing: {CONF['flac_dest']} has no albums in it")
     updates = {path: None for path in albums if path not in folders}
     # never-checked folders first, then the longest ago
     folders.sort(key=lambda p: (p in albums, albums.get(p, {}).get("checked", "")))
@@ -1203,6 +1207,10 @@ def prune(path, stop):
         d = os.path.dirname(d)
 
 
+class Stranded(RuntimeError):
+    """A cross-drive move failed and couldn't be put back whole: files are on both sides."""
+
+
 def move(src, dst):
     """A rename on the same drive; across drives a checksummed rsync that removes each
     source file only once it has landed."""
@@ -1224,12 +1232,16 @@ def move(src, dst):
         left = leftovers(src)
         if r.returncode or left:
             # put back whatever landed, so the caller's rollback starts from where it began
-            subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
-                            dst + "/", src + "/"], capture_output=True)
-            subprocess.run(["find", dst, "-depth", "-type", "d", "-empty", "-delete"])
-            prune(dst, mount_of(dst))
-            raise RuntimeError(f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left: "
-                               + ", ".join(left[:3]) + ")")
+            back = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
+                                   "--exclude", ".fuse_hidden*", dst + "/", src + "/"], capture_output=True)
+            stuck = leftovers(dst)
+            if not stuck:
+                subprocess.run(["find", dst, "-depth", "-type", "d", "-empty", "-delete"])
+                prune(dst, mount_of(dst))
+            why = f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left: " + ", ".join(left[:3]) + ")"
+            if back.returncode or stuck:
+                raise Stranded(f"{why}; putting it back failed too, {len(stuck)} files still in {dst}")
+            raise RuntimeError(why)
         clear_fuse_hidden(src)
         subprocess.run(["find", src, "-depth", "-type", "d", "-empty", "-delete"])
     prune(src, mount_of(src))
@@ -1283,6 +1295,9 @@ class Entry:
         self.journal()
         try:
             move(src, dst)
+        except Stranded:
+            self.journal()                        # still pending: undo_ops merges it back
+            raise
         except Exception:
             self.d["ops"].remove(op)              # move() has put everything back itself
             self.journal()
@@ -1346,7 +1361,9 @@ def set_release(album_id, mbid, album=None, any_ok=False):
     lidarr("flac", f"/album/{album_id}", "PUT", album)
 
 
-def undo_ops(ops):
+def undo_ops(ops, failed=None):
+    """Reverse `ops`, last first, carrying on past errors. The ops that couldn't be
+    reversed are added to `failed` if given."""
     errors = []
     for o in reversed(ops):
         try:
@@ -1381,6 +1398,8 @@ def undo_ops(ops):
                 fm.save_json(CONF[o["file"]], data)
         except Exception as e:
             errors.append(f"{o['op']}: {e}")
+            if failed is not None:
+                failed.insert(0, o)
     return errors
 
 
@@ -1843,8 +1862,17 @@ def decide(item, decision):
     try:
         table[decision](item, en)
     except Exception as e:
-        errors = undo_ops(en.d["ops"])
-        drop_journal(en.d)
+        failed = []
+        errors = undo_ops(en.d["ops"], failed)
+        if failed:
+            # something is still out of place, perhaps in the bin: keep what's left to put back
+            # as a bin entry, so Undo can finish it and Empty bin never sees nameless files
+            en.d["ops"] = failed
+            en.d["interrupted"] = True
+            en.d["label"] += " (rollback incomplete: undo to put it back)"
+            save_entry(en.d)
+        else:
+            drop_journal(en.d)
         log(f"FAILED {decision} {en.d['label']}: {e}"
             + (f" - rollback problems: {errors}" if errors else " - rolled back"))
         raise

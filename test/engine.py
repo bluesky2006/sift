@@ -881,6 +881,66 @@ r = sift("undo", en["id"])
 check(r.returncode == 0 and open(f"{D}/01.flac", "rb").read() == tagged, "undo puts the tag back byte for byte")
 check(sift("strip-id3", D).returncode == 0 and open(f"{D}/01.flac", "rb").read() == raw, "and it can be cut again")
 
+print("a move that can't be put back")
+json.dump(conf, open(f"{T}/conf.json", "w"))
+S.CONF.update(conf)
+S.BIN = f"{STATE}/bin.json"                                              # where the undo below looks
+os.environ["SIFT_FAKE_API"] = API
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+tone(f"{DATA}/music-flac/Strand/Alb/01.flac", "flac")
+tone(f"{DATA}/music-flac/Strand/Alb/02.flac", "flac")
+tone(f"{MUSIC}/MP3/Strand/Alb/01.mp3", "libmp3lame")
+os.chmod(f"{DATA}/music-flac/Strand/Alb/02.flac", 0)                     # 01 lands, 02 can't
+strand = {**busy, "id": 30, "artist": "Strand", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Strand/Alb",
+          "dest": f"{MUSIC}/FLAC/Strand/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Strand/Alb"], "mp3_id": 31, "mbid": "mb-30"}}
+migrated_before = load(conf["migrated"], {})
+real_run = subprocess.run
+def no_way_back(cmd, *a, **k):                                           # rsync out of the library fails
+    if cmd[0] == "rsync" and cmd[-2].startswith(f"{MUSIC}/FLAC/"):
+        return subprocess.CompletedProcess(cmd, 1, "", "the drive went away")
+    return real_run(cmd, *a, **k)
+subprocess.run = no_way_back
+try:
+    S.decide(strand, "keep_flac")
+    raised = None
+except Exception as e:
+    raised = e
+subprocess.run = real_run
+os.chmod(f"{DATA}/music-flac/Strand/Alb/02.flac", 0o644)
+check(isinstance(raised, S.Stranded), f"a cross-drive move whose copy back fails says so ({raised})")
+entries = load(f"{STATE}/bin.json")["entries"]
+check(len(entries) == 1 and entries[0]["interrupted"] and "rollback incomplete" in entries[0]["label"]
+      and [(o["op"], o.get("pending")) for o in entries[0]["ops"]] == [("move", True)],
+      "what the rollback couldn't put back stays in the bin, and only that")
+check(not os.listdir(f"{STATE}/pending"), "with no journal left behind")
+check(load(conf["migrated"], {}) == migrated_before and os.path.isfile(f"{MUSIC}/MP3/Strand/Alb/01.mp3"),
+      "the rest was rolled back")
+r = sift("undo", entries[0]["id"])
+check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Strand/Alb")) == ["01.flac", "02.flac"]
+      and not os.path.exists(f"{MUSIC}/FLAC/Strand"), "Undo finishes putting it back")
+del os.environ["SIFT_FAKE_API"]
+
+print("health with the library missing")
+json.dump({"albums": {f"{MUSIC}/FLAC/Well/Fine": {"sig": [1]}}}, open(S.HEALTH, "w"))
+S.CONF["check_mounts"] = True
+try:
+    S.health(1)
+    raised = None
+except RuntimeError as e:
+    raised = str(e)
+S.CONF["check_mounts"] = False
+check(raised and "not mounted" in str(raised) and f"{MUSIC}/FLAC/Well/Fine" in load(S.HEALTH)["albums"],
+      "an unmounted library drive is refused, and health.json keeps its results")
+S.CONF["flac_dest"] = f"{MUSIC}/Empty"
+os.makedirs(S.CONF["flac_dest"], exist_ok=True)
+try:
+    S.health(1)
+    raised = None
+except RuntimeError as e:
+    raised = str(e)
+S.CONF["flac_dest"] = conf["flac_dest"]
+check(raised and f"{MUSIC}/FLAC/Well/Fine" in load(S.HEALTH)["albums"], "so is a library folder with nothing in it")
+
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")
 sys.exit(1 if failures else 0)
