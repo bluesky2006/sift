@@ -1361,14 +1361,21 @@ def set_release(album_id, mbid, album=None, any_ok=False):
     lidarr("flac", f"/album/{album_id}", "PUT", album)
 
 
-def undo_ops(ops, failed=None):
+def undo_ops(ops, failed=None, progress=None):
     """Reverse `ops`, last first, carrying on past errors. The ops that couldn't be
-    reversed are added to `failed` if given."""
+    reversed are added to `failed` if given. With `progress` (which saves the ops), each op
+    is marked `reversed` as it finishes, and a move is marked pending before it starts, so
+    an undo that stops partway resumes from where it was: see undo_problems()."""
     errors = []
     for o in reversed(ops):
+        if o.get("reversed"):
+            continue
         try:
             if o["op"] == "move":
                 if not o.get("pending") or not os.path.exists(o["from"]):
+                    if progress and not o.get("pending"):
+                        o["pending"] = True           # cut off from here, merge_back finishes it
+                        progress()
                     move(o["to"], o["from"])
                 elif os.path.exists(o["to"]):
                     merge_back(o["to"], o["from"])
@@ -1400,6 +1407,10 @@ def undo_ops(ops, failed=None):
             errors.append(f"{o['op']}: {e}")
             if failed is not None:
                 failed.insert(0, o)
+            continue
+        if progress:
+            o["reversed"] = True
+            progress()
     return errors
 
 
@@ -1455,6 +1466,8 @@ def undo_problems(entry, entries):
         return [f"undo the later {later[-1]['decision']} on this album ({later[-1]['label']}) first"]
     problems = []
     for o in entry["ops"]:
+        if o.get("reversed"):
+            continue                              # put back by an undo that stopped partway
         if o["op"] == "move":
             try:
                 require_mounted(mount_of(o["from"]))
@@ -1999,10 +2012,10 @@ def undo(entry_id):
                           if x["op"] == "ignore_user" and x["user"] == o.get("user")), None)
             if o["op"] == "ignore_user" and o["added"] and other:
                 o["added"], other["added"] = False, True
-        errors = undo_ops(entry["ops"])
+        errors = undo_ops(entry["ops"], progress=lambda: fm.save_json(BIN, b))
         if errors:
             log(f"undo {entry['label']} incomplete: {errors}")
-            raise SystemExit("undo incomplete: " + "; ".join(errors))
+            raise SystemExit("undo incomplete, Undo again to finish once fixed: " + "; ".join(errors))
         b["entries"] = [e for e in b["entries"] if e["id"] != entry_id]
         fm.save_json(BIN, b)
         remember("undone", {**summary(entry), "undone": now()})

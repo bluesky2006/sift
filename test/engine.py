@@ -920,6 +920,31 @@ check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Strand/Alb")) 
       and not os.path.exists(f"{MUSIC}/FLAC/Strand"), "Undo finishes putting it back")
 del os.environ["SIFT_FAKE_API"]
 
+print("an undo that stops partway")
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+tone(f"{DATA}/music-flac/Resume/Alb/01.flac", "flac")
+tone(f"{DATA}/music-flac/Resume/Alb/02.flac", "flac")
+tone(f"{MUSIC}/MP3/Resume/Alb/01.mp3", "libmp3lame")
+resume = {**busy, "id": 32, "artist": "Resume", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Resume/Alb",
+          "dest": f"{MUSIC}/FLAC/Resume/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Resume/Alb"], "mp3_id": 33, "mbid": "mb-32"}}
+json.dump({"items": [resume]}, open(f"{STATE}/queue.json", "w"))
+check(sift("resolve", "32", "keep_flac").returncode == 0, "Keep FLAC")
+eid = load(f"{STATE}/bin.json")["entries"][0]["id"]
+os.chmod(f"{MUSIC}/FLAC/Resume/Alb/02.flac", 0)                          # the FLAC can't go back yet
+r = sift("undo", eid, ok=False)
+os.chmod(f"{MUSIC}/FLAC/Resume/Alb/02.flac", 0o644)
+ops = load(f"{STATE}/bin.json")["entries"][0]["ops"]
+check(r.returncode != 0 and os.path.isfile(f"{MUSIC}/MP3/Resume/Alb/01.mp3")
+      and sorted(os.listdir(f"{MUSIC}/FLAC/Resume/Alb")) == ["01.flac", "02.flac"],
+      "an undo that fails partway puts back what it can, and leaves the FLAC whole")
+moves = {o["from"]: o for o in ops if o["op"] == "move"}
+check(moves[f"{MUSIC}/MP3/Resume/Alb"].get("reversed") and not moves[f"{DATA}/music-flac/Resume/Alb"].get("reversed"),
+      "bin.json records what is already put back")
+r = sift("undo", eid)
+check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Resume/Alb")) == ["01.flac", "02.flac"]
+      and not os.path.exists(f"{MUSIC}/FLAC/Resume") and load(f"{STATE}/bin.json")["entries"] == [],
+      "Undo again finishes it, where it used to refuse")
+
 print("health with the library missing")
 json.dump({"albums": {f"{MUSIC}/FLAC/Well/Fine": {"sig": [1]}}}, open(S.HEALTH, "w"))
 S.CONF["check_mounts"] = True
