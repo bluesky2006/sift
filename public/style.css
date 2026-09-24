@@ -170,9 +170,6 @@ a.row:active { transform: scale(.99); }
 .stagedrow.gone { height: 0 !important; opacity: 0; transform: translateX(24px); margin-bottom: 0; padding-top: 0; padding-bottom: 0; border-width: 0; }
 .stagedrow.failed { opacity: 1; border-color: var(--bad); }
 .stagedrow.failed .rreason { color: var(--bad); white-space: normal; }
-.badge.decision.more { cursor: pointer; padding-right: 4px; display: inline-flex; align-items: center; gap: 1px; }
-.badge.decision.more .ic { width: 13px; height: 13px; transition: transform .2s; }
-.badge.decision.more.open .ic { transform: rotate(180deg); }
 .stagedrow { flex-wrap: wrap; }
 .rdetail { flex-basis: 100%; margin: 2px 0 0 33px; font-size: 13px; color: var(--muted); }
 @media (max-width: 560px) {                     /* room for the title and the decision on a phone */

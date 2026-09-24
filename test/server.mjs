@@ -241,6 +241,14 @@ try {
     `the engine gets what was staged, from the server, with the release found by its id where it sits now (${lastCall()})`);
   fs.writeFileSync(queueFile, queueBefore);
   check((await stagedNow()).length === 0, 'and the staged list is empty');
+  await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf });
+  await req('/api/decide', { method: 'POST', body: { id: 2, decision: 'keep_mp3' }, csrf });
+  check((await req('/api/apply-staged', { method: 'POST', body: { ids: [1] }, csrf })).status === 202
+    && (await stagedNow()).map((e) => e.id).join() === '2', 'approving some leaves the rest staged');
+  check((await req('/api/apply-staged', { method: 'POST', body: { ids: [2] }, csrf })).status === 409
+    && (await stagedNow()).map((e) => e.id).join() === '2', 'and a second approval while one runs is refused, keeping its album staged');
+  await new Promise((res) => setTimeout(res, 1500));
+  await req('/api/unstage', { method: 'POST', body: { ids: [2] }, csrf });
 
   console.log('track tools');
   await new Promise((res) => setTimeout(res, 200));

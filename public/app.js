@@ -343,12 +343,9 @@ function row(i) {
   if (st) {
     return `<div class="row stagedrow"><input type="checkbox" class="approvepick" data-approve="${i.id}" ${unticked.has(i.id) ? '' : 'checked'}
       aria-label="Approve ${esc(i.artist)} — ${esc(i.title)}"><a class="rlink" href="#/album/${i.id}">${inner.replace('<span class="badges">',
-        `<span class="badges">${st.release
-          ? `<span class="badge decision more" role="button" tabindex="0" data-more="${i.id}" aria-expanded="false"
-              aria-controls="more-${i.id}" title="Which release">${esc(stagedName(st))}${ic('chev')}</span>`
-          : `<span class="badge decision">${esc(stagedName(st))}</span>`}`)}</a>
+        `<span class="badges"><span class="badge decision">${esc(stagedName(st))}</span>`)}</a>
       <button class="ghost small" data-unstage="${i.id}" aria-label="Remove from Staged" title="Remove from Staged">${ic('x')}<span class="lbl">Remove</span></button>
-      ${st.release ? `<p class="rdetail" id="more-${i.id}" hidden>Release: ${esc(st.release)}</p>` : ''}</div>`;
+      ${st.release ? `<p class="rdetail">Release: ${esc(st.release)}</p>` : ''}</div>`;
   }
   if (selecting) {
     return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
@@ -426,18 +423,6 @@ function renderList() {
   }
   view.querySelectorAll('[data-approve]').forEach((c) => {
     c.onchange = () => { const id = Number(c.dataset.approve); if (c.checked) unticked.delete(id); else unticked.add(id); renderApproveButton(); };
-  });
-  // the pill stays short; the release it was staged with opens under the row
-  view.querySelectorAll('[data-more]').forEach((b) => {
-    const toggle = (ev) => {
-      ev.preventDefault(); ev.stopPropagation();
-      const p = $(`more-${b.dataset.more}`);
-      p.hidden = !p.hidden;
-      b.setAttribute('aria-expanded', String(!p.hidden));
-      b.classList.toggle('open', !p.hidden);
-    };
-    b.onclick = toggle;
-    b.onkeydown = (ev) => { if (ev.key === 'Enter' || ev.key === ' ') toggle(ev); };
   });
   view.querySelectorAll('[data-unstage]').forEach((b) => {
     b.onclick = async () => {

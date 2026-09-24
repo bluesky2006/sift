@@ -446,6 +446,14 @@ try {
   await page.waitForTimeout(800);
   const staged4 = await page.evaluate(async () => (await (await fetch('/api/state')).json()).staged.find((e) => e.id === 4));
   check(staged4 && staged4.release === '1999 · Next One · CD · UK', 'the chosen release is staged with it');
+  await page.goto(BASE + '/app');
+  await page.waitForSelector('.queue');
+  await page.click('[data-tab="staged"]');
+  const row4 = page.locator('.stagedrow:has([data-approve="4"])');
+  check(await row4.locator('.rdetail').isVisible() && (await row4.locator('.rdetail').textContent()) === 'Release: 1999 · Next One · CD · UK'
+    && await row4.locator('a.rlink [role="button"], a.rlink button').count() === 0,
+    'the Staged row says which release, with nothing to press inside its link');
+  if (process.env.SIFT_SHOT) await page.screenshot({ path: process.env.SIFT_SHOT });
   await page.evaluate(async () => {
     const { csrf } = await (await fetch('/api/csrf')).json();
     await fetch('/api/unstage', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF': csrf }, body: JSON.stringify({ ids: [4] }) });
@@ -510,6 +518,22 @@ try {
   await page.click('#dok');
   await page.waitForTimeout(1500);
   check(calls().some((c) => c.endsWith('empty-bin 30')), 'with the password, only the old part is emptied');
+  await page.evaluate(() => { location.hash = '#/'; });
+  await page.evaluate(() => { location.hash = '#/bin'; });
+  await page.waitForSelector('#empty');
+  await page.click('#empty');
+  await page.fill('#dpassword', 'not-the-password');
+  await page.click('#dok');
+  await page.waitForSelector('#derror:visible', { timeout: 5000 }).catch(() => {});
+  check((await page.locator('#derror').textContent()) === 'Wrong password' && await page.locator('#dialog').isVisible()
+    && !calls().some((c) => c.endsWith(' empty-bin')), 'a wrong password empties nothing, and asks again');
+  // the browser logs the refusal (a 401) as a console error: expected here
+  errors.splice(0, errors.length, ...errors.filter((m) => !m.includes('status of 401')));
+  await page.click('#dcancel');
+  await page.click('[data-undo="e1"]');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('undo e1')), 'Undo asks, then sends that bin entry');
   await page.evaluate(() => { location.hash = '#/history'; });
   await page.waitForSelector('.tiles');
   check((await page.locator('.histrow .rtitle').first().textContent()) === 'Band — Record' && await page.locator('.tile').count() === 4, 'history lists decisions with totals');
