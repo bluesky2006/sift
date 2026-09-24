@@ -201,54 +201,78 @@ function renderStatus() {
   $('binlink').textContent = state.bin.length ? `Bin (${gb(binBytes)})` : 'Bin';
 }
 
-let polling = false;
-async function watchJob() {
-  if (polling) return;
-  polling = true;
+// Follows the running job to its end and returns it, or null if it can't be followed. A
+// second call while one is watching waits on the same one.
+let polling = null;
+function watchJob() {
+  if (!polling) polling = followJob().finally(() => { polling = null; checking(false); });
+  return polling;
+}
+async function followJob() {
   const bar = $('jobbar');
   $('jobspin').hidden = false;
   $('jobclose').hidden = true;
   $('joboutput').hidden = true;
-  try {
-    for (;;) {
-      const { job } = await api('/api/job');
-      if (!job) break;
-      // a check says so in its own button; a failure is a toast, and the error is kept in History
-      const inline = job.kind === 'check';
-      checking(inline && !job.done);
-      bar.hidden = inline;
-      $('joblabel').textContent = job.label + (job.done ? (job.ok ? ' — done' : ' — failed') : '…');
-      if (job.kind === 'apply-staged') followApproval(job);
-      if (job.done) {
-        $('jobspin').hidden = true;
-        await loadState();
-        if (job.ok && afterJob) { const go = afterJob; afterJob = null; location.hash = go; }
-        if (!job.ok) afterJob = null;
-        if (job.ok && /^skipped /m.test(job.output)) {
-          // some went ahead and some didn't: keep the bar open with what was skipped
-          bar.hidden = false;
-          $('joboutput').textContent = job.output;
-          $('joboutput').hidden = false;
-          $('jobclose').hidden = false;
-        } else if (job.ok) {
-          setTimeout(() => { bar.hidden = true; }, 2500);
-          const note = { keep_flac: 'Moved into the FLAC library. Undo is in the bin.',
-            keep_mp3: 'Done. Undo is in the bin.', refetch: 'FLAC is in the bin and Soularr will look again.',
-            'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
-          if (note) toast(note);
-        } else if (inline) {
-          toast('The check failed. History has the error.');
-        } else {
-          $('joboutput').textContent = job.output;
-          $('joboutput').hidden = false;
-          $('jobclose').hidden = false;
-        }
-        route();
-        break;
-      }
-      await new Promise((r) => setTimeout(r, approving.size ? 600 : 1500));
+  // the server restarted (it forgets its job) or can't be reached: stop following, and show
+  // whatever the engine got done
+  const lost = async (why) => {
+    $('jobspin').hidden = true;
+    afterJob = null;
+    approving.clear();
+    $('joblabel').textContent = why;
+    bar.hidden = false;
+    $('jobclose').hidden = false;
+    await loadState().catch(() => {});
+    route();
+    return null;
+  };
+  let misses = 0;
+  for (;;) {
+    let job;
+    try {
+      ({ job } = await api('/api/job'));
+      misses = 0;
+    } catch (e) {
+      if (e.message === 'signed out') throw e;
+      if (++misses >= 10) return lost('Lost touch with Sift. Reload the page; History says how the job went.');
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
     }
-  } finally { polling = false; checking(false); }
+    if (!job) return lost('Sift restarted while that ran. History says how far it got.');
+    // a check says so in its own button; a failure is a toast, and the error is kept in History
+    const inline = job.kind === 'check';
+    checking(inline && !job.done);
+    bar.hidden = inline;
+    $('joblabel').textContent = job.label + (job.done ? (job.ok ? ' — done' : ' — failed') : '…');
+    if (job.kind === 'apply-staged') followApproval(job);
+    if (job.done) {
+      $('jobspin').hidden = true;
+      await loadState();
+      if (job.ok && afterJob) { const go = afterJob; afterJob = null; location.hash = go; }
+      if (!job.ok) afterJob = null;
+      if (job.ok && /^skipped /m.test(job.output)) {
+        // some went ahead and some didn't: keep the bar open with what was skipped
+        bar.hidden = false;
+        $('joboutput').textContent = job.output;
+        $('joboutput').hidden = false;
+        $('jobclose').hidden = false;
+      } else if (job.ok) {
+        setTimeout(() => { bar.hidden = true; }, 2500);
+        const note = { 'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.',
+          undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
+        if (note) toast(note);
+      } else if (inline) {
+        toast('The check failed. History has the error.');
+      } else {
+        $('joboutput').textContent = job.output;
+        $('joboutput').hidden = false;
+        $('jobclose').hidden = false;
+      }
+      route();
+      return job;
+    }
+    await new Promise((r) => setTimeout(r, approving.size ? 600 : 1500));
+  }
 }
 $('jobclose').onclick = () => { $('jobbar').hidden = true; };
 
@@ -518,7 +542,7 @@ function buildRows(a) {
   if (a.pairs && a.pairs.length) {
     const used = new Set();
     for (const p of a.pairs) {
-      rows.push({ m: p.m, f: p.f, sim: p.sim, same: p.same });
+      rows.push({ m: p.m, f: p.f, sim: p.sim, same: p.same, manual: p.manual });
       if (p.f != null) used.add(p.f);
     }
     flac.forEach((_, f) => { if (!used.has(f)) rows.push({ m: null, f }); });
@@ -805,8 +829,8 @@ async function renderAlbum(id, keepMode = false) {
     w.onchange = async () => {
       try {
         await api('/api/decide', { id: a.id, decision: w.checked ? 'watch_on' : 'watch_off' });
-        await watchJob();
-        toast(w.checked ? 'Soularr will look for a better copy.' : 'Soularr will stop looking.');
+        const job = await watchJob();
+        if (job && job.ok) toast(w.checked ? 'Soularr will look for a better copy.' : 'Soularr will stop looking.');
       } catch (e) { w.checked = !w.checked; toast(e.message); }
     };
   }
@@ -816,12 +840,16 @@ async function renderAlbum(id, keepMode = false) {
     if (body.tool === 'reorder' || body.tool === 'bin_track') releaseAudio();
     try {
       await api('/api/track', { id: a.id, ...body });
-      await watchJob();
-      if (note) toast(note);
+      const job = await watchJob();
+      if (note && job && job.ok) toast(note);
     } catch (e) { toast(e.message); }
   };
   const tool0 = async (url, body, note) => {
-    try { await api(url, body); await watchJob(); toast(note); } catch (e) { toast(e.message); }
+    try {
+      await api(url, body);
+      const job = await watchJob();
+      if (job && job.ok) toast(note);
+    } catch (e) { toast(e.message); }
   };
   const on = (idOrSel, fn) => { const el = typeof idOrSel === 'string' ? $(idOrSel) : idOrSel; if (el) el.onclick = fn; };
   on('block', async () => {

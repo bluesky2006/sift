@@ -196,6 +196,31 @@ try {
   await page.locator('.trow').nth(1).locator('.cell').last().click();
   await page.waitForTimeout(1500);
   check(calls().some((c) => c.endsWith('pair 1 2 2')), 'tapping a FLAC track pairs them');
+  // the engine marks a hand pair manual, with no similarity; show it as one, with a way to forget it
+  const queueFile = path.join(STATE, 'queue.json');
+  const unpaired = fs.readFileSync(queueFile, 'utf8');
+  const handPaired = JSON.parse(unpaired);
+  handPaired.items[0].pairs[2] = { m: 2, f: 3, sim: null, same: true, manual: true };
+  fs.writeFileSync(queueFile, JSON.stringify(handPaired));
+  await page.goto(BASE + '/app');
+  await page.waitForSelector('.queue');
+  await page.click('[data-tab="different"]');
+  await page.click('a.row[href="#/album/1"]');
+  await page.waitForSelector('.tracks');
+  check(await page.locator('.match.manual [data-unpair="2"]').isVisible(), 'a hand pair shows as one, with Forget this pair');
+  await page.click('[data-unpair="2"]');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('unpair 1 2')), 'which forgets it');
+  fs.writeFileSync(queueFile, unpaired);
+
+  console.log('a job the server forgets');
+  await page.route('**/api/job', (r) => r.fulfill({ contentType: 'application/json', body: '{"job":null}' }));
+  const lostJob = await page.evaluate(() => watchJob());
+  check(lostJob === null && await page.locator('#jobspin').isHidden()
+    && (await page.locator('#joblabel').textContent()).includes('restarted') && await page.locator('#jobclose').isVisible(),
+    'a restart mid-job ends the spinner and says so, rather than spinning forever');
+  await page.unroute('**/api/job');
+  await page.click('#jobclose');
 
   console.log('ordering');
   const openAlbum = async () => {
