@@ -961,6 +961,25 @@ json.dump({"items": [changed]}, open(f"{STATE}/queue.json", "w"))
 check(sift("resolve", "34", "keep_flac").returncode == 0 and os.path.isfile(f"{MUSIC}/FLAC/Changed/Alb/02.flac"),
       "and goes ahead once checked again")
 
+print("a record that won't parse")
+tone(f"{DATA}/music-flac/Garbled/Alb/01.flac", "flac")
+tone(f"{MUSIC}/MP3/Garbled/Alb/01.mp3", "libmp3lame")
+garbled = {**busy, "id": 36, "artist": "Garbled", "_do": {**busy["_do"], "flac_dir": f"{DATA}/music-flac/Garbled/Alb",
+           "dest": f"{MUSIC}/FLAC/Garbled/Alb", "mp3_dirs": [f"{MUSIC}/MP3/Garbled/Alb"], "mp3_id": 37, "mbid": "mb-36"}}
+json.dump({"items": [garbled]}, open(f"{STATE}/queue.json", "w"))
+good_bin = open(f"{STATE}/bin.json").read()
+open(f"{STATE}/bin.json", "w").write('{"entries": [{"id": "half-writ')
+r = sift("resolve", "36", "keep_flac", ok=False)
+check(r.returncode != 0 and "won't parse" in r.stdout + r.stderr and open(f"{STATE}/bin.json").read() == '{"entries": [{"id": "half-writ'
+      and os.path.isdir(f"{DATA}/music-flac/Garbled/Alb"), "a bin.json that won't parse stops a decision before anything moves, and is kept")
+open(f"{STATE}/bin.json", "w").write(good_bin)
+good_ledger = open(conf["migrated"]).read()
+open(conf["migrated"], "w").write("{not json")
+r = sift("resolve", "36", "keep_flac", ok=False)
+check(r.returncode != 0 and open(conf["migrated"]).read() == "{not json" and os.path.isdir(f"{DATA}/music-flac/Garbled/Alb")
+      and os.path.isdir(f"{MUSIC}/MP3/Garbled/Alb"), "so does a ledger, which is kept too")
+open(conf["migrated"], "w").write(good_ledger)
+
 print("health with the library missing")
 json.dump({"albums": {f"{MUSIC}/FLAC/Well/Fine": {"sig": [1]}}}, open(S.HEALTH, "w"))
 S.CONF["check_mounts"] = True

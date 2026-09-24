@@ -107,6 +107,11 @@ class Lock:
             fcntl.flock(self.f, fcntl.LOCK_EX | (0 if self.wait else fcntl.LOCK_NB))
         except BlockingIOError:
             raise SystemExit("another Sift job is running")
+        try:
+            load_record(BIN, None)                # a bin.json that won't parse stops us before anything moves
+        except RuntimeError:
+            self.__exit__()
+            raise
         recover()
         return self
 
@@ -1299,7 +1304,7 @@ class Entry:
         """Written as each step starts, so a decision killed partway (a service restart,
         a crash) still reaches the bin and can be undone. See recover()."""
         os.makedirs(PENDING, exist_ok=True)
-        fm.save_json(os.path.join(PENDING, self.d["id"] + ".json"), self.d)
+        save_record(os.path.join(PENDING, self.d["id"] + ".json"), self.d)
 
     def move(self, src, dst):
         op = {"op": "move", "from": src, "to": dst, "pending": True}
@@ -1321,11 +1326,13 @@ class Entry:
         self.move(src, bin_dir(self.d["id"], src))
 
     def monitor(self, inst, album_id, value):
+        # recorded before the change is made, as moves are: a PUT that times out may still
+        # have landed, and putting back a value that never changed is harmless
         before = lidarr(inst, f"/album/{album_id}").get("monitored")
-        lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
         self.d["ops"].append({"op": "monitor", "inst": inst, "album": album_id,
                               "before": before})
         self.journal()
+        lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
 
     def release(self, album_id, mbid):
         """Make `mbid` the album's selected release in Lidarr-FLAC, which Soularr searches for."""
@@ -1335,22 +1342,22 @@ class Entry:
             raise RuntimeError("Lidarr-FLAC doesn't list that release for this album")
         before = next((r["foreignReleaseId"] for r in rels if r.get("monitored")), None)
         any_ok = album.get("anyReleaseOk", False)
-        set_release(album_id, mbid, album)
         self.d["ops"].append({"op": "release", "album": album_id, "before": before, "any_ok": any_ok})
         self.journal()
+        set_release(album_id, mbid, album)
 
     def ignore_user(self, user):
         already = user in ignored_users()
-        if not already:
-            set_ignored(lambda users: users + [user])
         self.d["ops"].append({"op": "ignore_user", "user": user, "added": not already})
         self.journal()
+        if not already:
+            set_ignored(lambda users: users + [user])
 
     def ledger(self, which, key, value):
         """Set (or with value None, delete) one ledger entry, remembering the first
         value it had in this decision."""
         path = CONF[which]
-        data = fm.load_json(path, {})
+        data = load_record(path, {})
         if not any(o["op"] == "ledger" and o["file"] == which and o["key"] == key
                    for o in self.d["ops"]):
             self.d["ops"].append({"op": "ledger", "file": which, "key": key,
@@ -1360,7 +1367,7 @@ class Entry:
             data.pop(key, None)
         else:
             data[key] = value
-        fm.save_json(path, data)
+        save_record(path, data)
 
 
 def set_release(album_id, mbid, album=None, any_ok=False):
@@ -1409,12 +1416,12 @@ def undo_ops(ops, failed=None, progress=None):
                 with open(o["file"], "ab") as f:
                     f.write(base64.b64decode(o["tag"]))
             elif o["op"] == "ledger":
-                data = fm.load_json(CONF[o["file"]], {})
+                data = load_record(CONF[o["file"]], {})
                 if o["before"] is None:
                     data.pop(o["key"], None)
                 else:
                     data[o["key"]] = o["before"]
-                fm.save_json(CONF[o["file"]], data)
+                save_record(CONF[o["file"]], data)
         except Exception as e:
             errors.append(f"{o['op']}: {e}")
             if failed is not None:
@@ -1435,11 +1442,33 @@ def entry_bytes(entry):
     return total
 
 
+def load_record(path, default):
+    """bin.json and the ledgers. Only a missing file is empty: one that won't parse stops the
+    job, where treating it as empty would overwrite every record with just the next one."""
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except ValueError as e:
+        raise RuntimeError(f"refusing: {path} won't parse ({e}); restore it from a backup first")
+
+
+def save_record(path, data):
+    """Written whole and flushed to disk before it replaces the old one."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def save_entry(entry):
-    b = fm.load_json(BIN, {"entries": []})
+    b = load_record(BIN, {"entries": []})
     entry["bytes"] = entry_bytes(entry)
     b["entries"].append(entry)
-    fm.save_json(BIN, b)
+    save_record(BIN, b)
     drop_journal(entry)
 
 
@@ -1543,6 +1572,8 @@ def strip_id3(folders=None):
                 with open(p, "rb+") as f:
                     f.seek(-128, os.SEEK_END)
                     tag = f.read(128)
+                    if tag[:3] != b"TAG":              # changed since has_id3v1 looked
+                        continue
                     en.d["ops"].append({"op": "id3v1", "file": p, "tag": base64.b64encode(tag).decode()})
                     en.journal()
                     f.seek(-128, os.SEEK_END)
@@ -1561,7 +1592,8 @@ def strip_id3(folders=None):
         print(f"{artist} — {title}: {len(en.d['ops'])} tag(s) cut", flush=True)
     print(f"{done} file(s) trimmed", flush=True)
     if done:
-        refresh_queue()
+        with Lock():                               # a rebuild reads the files a decision moves
+            refresh_queue()
 
 
 # ---- decisions -----------------------------------------------------------------
@@ -1867,10 +1899,10 @@ def watch(item, on):
     lidarr("flac", "/album/monitor", "PUT", {"albumIds": [item["id"]], "monitored": on})
     k = str(item["id"])
     for which in ("returned", "damaged"):
-        data = fm.load_json(CONF[which], {})
+        data = load_record(CONF[which], {})
         if k in data:
             data[k]["watch"] = on
-            fm.save_json(CONF[which], data)
+            save_record(CONF[which], data)
     q = fm.load_json(QUEUE, {})
     for i in q.get("items", []):
         if i["id"] == item["id"]:
@@ -2013,7 +2045,7 @@ def summary(entry):
 
 def undo(entry_id):
     with Lock():
-        b = fm.load_json(BIN, {"entries": []})
+        b = load_record(BIN, {"entries": []})
         entry = next((e for e in b["entries"] if e["id"] == entry_id), None)
         if not entry:
             raise SystemExit("no such bin entry")
@@ -2027,12 +2059,12 @@ def undo(entry_id):
                           if x["op"] == "ignore_user" and x["user"] == o.get("user")), None)
             if o["op"] == "ignore_user" and o["added"] and other:
                 o["added"], other["added"] = False, True
-        errors = undo_ops(entry["ops"], progress=lambda: fm.save_json(BIN, b))
+        errors = undo_ops(entry["ops"], progress=lambda: save_record(BIN, b))
         if errors:
             log(f"undo {entry['label']} incomplete: {errors}")
             raise SystemExit("undo incomplete, Undo again to finish once fixed: " + "; ".join(errors))
         b["entries"] = [e for e in b["entries"] if e["id"] != entry_id]
-        fm.save_json(BIN, b)
+        save_record(BIN, b)
         remember("undone", {**summary(entry), "undone": now()})
         rescan("flac"), rescan("mp3")
         refresh_queue()
@@ -2066,7 +2098,7 @@ def empty_bin(days=None):
     entry at a time, saving bin.json after each, so a delete that fails partway never leaves
     an entry listed whose files are gone."""
     with Lock():
-        b = fm.load_json(BIN, {"entries": []})
+        b = load_record(BIN, {"entries": []})
         gone = b["entries"] if days is None else older_than(b["entries"], days)
         roots = bin_roots()
         emptied, error = [], None
@@ -2079,7 +2111,7 @@ def empty_bin(days=None):
                 break
             emptied.append(e)
             b["entries"] = [x for x in b["entries"] if x["id"] != e["id"]]
-            fm.save_json(BIN, b)
+            save_record(BIN, b)
         if days is None and not error:
             # leftovers no entry names, e.g. from before bin.json existed
             for real in roots:
