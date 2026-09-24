@@ -47,6 +47,9 @@ CONF = {
     "migrated": fm.MIGRATED,
     "returned": fm.RETURNED,
     "damaged": os.path.join(fm.HERE, "flac-damaged.json"),
+    # library albums sent back to Soularr from Library health, with the copies they replaced
+    "refetched": os.path.join(STATE, "refetched.json"),
+    "quarantine": fm.QUARANTINE,                   # where the migration retired MP3s to
     "flac_api": fm.FLAC_API, "flac_config": "/DATA/AppData/lidarr-flac/config/config.xml",
     "mp3_api": "http://localhost:8686/api/v1", "mp3_config": "/DATA/AppData/lidarr/config/config.xml",
     "flac_db": fm.FLAC_DB, "mp3_db": fm.MP3_DB,
@@ -380,12 +383,72 @@ def details(inst, album_id, files):
     return d
 
 
+def binned_copy(path):
+    """Where a folder that has left the library is now: still in place, or somewhere in the
+    bin, found through the move that took it (or a folder above it) there."""
+    if os.path.isdir(path):
+        return path
+    for e in fm.load_json(BIN, {"entries": []})["entries"]:
+        for o in e["ops"]:
+            if o["op"] == "move" and (path == o["from"] or path.startswith(o["from"] + "/")):
+                there = o["to"] + path[len(o["from"]):]
+                if os.path.isdir(there):
+                    return there
+    return None
+
+
+def refetch_reference(rec):
+    """The copy a refetched album replaced, if it is still in the bin: the MP3 it was first
+    retired against, else the library FLAC Library health binned."""
+    mp3 = [binned_copy(os.path.join(CONF["quarantine"], os.path.relpath(d, CONF["mp3_root"])))
+           or binned_copy(d) for d in rec.get("mp3_dirs", [])]
+    if mp3 and all(mp3):
+        files = fm.folder_audio(mp3)
+        if files:
+            return "MP3", files
+    old = rec.get("old_flac") and binned_copy(rec["old_flac"])
+    files = fm.folder_audio([old]) if old else []
+    return ("FLAC", files) if files else (None, [])
+
+
+def refetched(e):
+    """A no-MP3 album that is really a library album refetched from Library health: checked
+    against the copy it replaced, so a good one can go through Stage all like any other."""
+    rec = fm.load_json(CONF["refetched"], {}).get(str(e["flac_id"]))
+    if not rec:
+        return None
+    day = datetime.fromisoformat(rec["at"]).strftime("%-d %b")
+    kind, ref = refetch_reference(rec)
+    out = {"on": rec["at"], "against": kind}
+    if not ref:
+        out["reason"] = (f"Refetched from Library health on {day}; the copy it replaced has left the bin, "
+                         "so there is nothing to compare it with; every FLAC file decodes cleanly")
+        return out
+    odd = [t for t in fm.match_tracks(ref, e["flac_files"]) if not t["same"]]
+    what = "the MP3 it first replaced" if kind == "MP3" else "the library copy it replaced"
+    if odd:
+        out["queue"] = "different"
+        out["reason"] = (f"Refetched from Library health on {day}; {len(odd)} of {len(ref)} tracks of {what} "
+                         "(still in the bin) have no fingerprint match: " + ", ".join(t["mp3"] for t in odd[:3]))
+    else:
+        out["queue"] = "ready"
+        out["reason"] = (f"Refetched from Library health on {day}; every track matches {what} "
+                         "(still in the bin) by fingerprint, and every FLAC file decodes cleanly")
+    return out
+
+
 def item_from_plan(e, hold):
     q = QUEUES[e["status"]]
     reasons = list(e["notes"])
+    again = refetched(e) if e["status"] == "no_mp3" and e.get("flac_files") else None
+    if again:
+        reasons.insert(0, again["reason"])
+        if again.get("queue"):
+            e = {**e, "status": "refetched"}
+            q = again["queue"]
     if e["status"] == "retire":
         reasons.insert(0, "Every track matches, and every FLAC file decodes cleanly")
-    elif e["status"] == "no_mp3":
+    elif e["status"] == "no_mp3" and not again:
         reasons.insert(0, "No MP3 of this album to replace; every FLAC file decodes cleanly")
     flac_files, mp3_files = e.get("flac_files", []), e.get("mp3_files", [])
     if hold:
@@ -400,7 +463,7 @@ def item_from_plan(e, hold):
     else:
         if has_mp3:
             allowed.append("keep_mp3")
-        elif e["status"] == "no_mp3":
+        elif e["status"] in ("no_mp3", "refetched"):
             # nothing was replaced, so there is no Keep MP3 to throw it out with:
             # Put in the bin is the only way to say this album was never wanted
             allowed.append("bin_album")
@@ -410,6 +473,7 @@ def item_from_plan(e, hold):
         "id": e["flac_id"], "artist": e["artist"], "title": e["title"], "queue": q,
         "status": e["status"], "reasons": reasons, "allowed": allowed,
         "watch": e.get("monitored", False),
+        "refetched": {"on": again["on"], "checked": bool(again.get("queue"))} if again else None,
         "flac": {"tracks": tracks(flac_files, flac=True, checks=q != "arriving"),
                  "seconds": e.get("flac_seconds"), "details": details("flac", e["flac_id"], flac_files)},
         "mp3": {"tracks": tracks(mp3_files, checks=q != "arriving"), "seconds": e.get("mp3_seconds"),
@@ -963,9 +1027,14 @@ def health_refetch(item, en):
     migration record goes, so a new copy comes through the queue again, and it is monitored
     in Lidarr-FLAC. Without a Lidarr-FLAC album this is Put in the bin."""
     do = item["_do"]
+    key = do.get("migrated_key")
+    rec = fm.load_json(CONF["migrated"], {}).get(key) if key else None
     en.to_bin(do["flac_dir"])
-    if do.get("migrated_key"):
-        en.ledger("migrated", do["migrated_key"], None)
+    if key:
+        # the new copy arrives with no MP3 behind it: this is what it gets checked against
+        en.ledger("refetched", key, {"at": now(), "mp3_dirs": (rec or {}).get("mp3_dirs", []),
+                                     "old_flac": en.d["ops"][-1]["to"]})
+        en.ledger("migrated", key, None)
     if do.get("flac_album"):
         en.monitor("flac", do["flac_album"], True)
 
@@ -1468,6 +1537,7 @@ def keep_flac(item, en):
         "status": "sift_keep_flac", "dest": do["dest"], "mp3_dirs": do["mp3_dirs"],
         "mp3_id": do["mp3_id"], "started": now()})
     en.ledger("returned", k, None)
+    en.ledger("refetched", k, None)
     en.move(do["flac_dir"], do["dest"])
     for d in do["mp3_dirs"]:
         en.to_bin(d)

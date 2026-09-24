@@ -9,7 +9,8 @@ const view = $('view');
 const QUEUES = [
   ['staged', 'Staged', "Decisions waiting for your approval. Nothing has moved yet. Untick any you're unsure of, then approve the rest."],
   ['ready', 'Ready', 'Exact matches: every track matches the MP3 by fingerprint and every FLAC file decodes cleanly. '
-    + 'An album badged "No MP3 to replace" has nothing to match against, so Stage all leaves it for you to decide on its own.'],
+    + 'An album badged "No MP3 to replace" has nothing to match against, so Stage all leaves it for you to decide on its own. '
+    + 'A refetched album is matched against the copy it replaced while that copy is still in the bin.'],
   ['suspect', 'Suspect FLAC', 'Most FLAC tracks stop short of the top of the spectrum, as a FLAC made from an MP3 does. Compare the spectrograms before deciding: some old or lo-fi recordings stop early too.'],
   ['different', 'Different or unconfirmed version', "The fingerprints don't prove the FLAC is the same recording as the MP3."],
   ['lineup', "Doesn't line up", 'Fewer tracks, a noticeably different length, or an MP3 folder shared with another album.'],
@@ -293,7 +294,8 @@ function row(i) {
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
   if (sortBy === 'arrived' && i.flac && i.flac.imported) badges.push(`<span class="badge" title="When the FLAC arrived">got ${day(i.flac.imported)}</span>`);
   if (i.mp3) badges.push(`<span class="badge mp3">MP3 ${esc(i.mp3.fmt)} · ${i.mp3.n}</span>`);
-  if (i.no_mp3) badges.push('<span class="badge warn">No MP3 to replace</span>');
+  if (i.refetched) badges.push(`<span class="badge${i.refetched.checked ? '' : ' warn'}" title="Sent back to Soularr from Library health">Refetched ${day(i.refetched.on)}</span>`);
+  else if (i.no_mp3) badges.push('<span class="badge warn">No MP3 to replace</span>');
   if (i.flac && i.flac.damaged) badges.push(`<span class="badge bad">${i.flac.damaged} damaged</span>`);
   if (i.suspect) badges.push(`<span class="badge bad">FLAC stops at ${khz(i.suspect.hz)}</span>`);
   const inner = `${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
@@ -714,9 +716,12 @@ async function renderAlbum(id, keepMode = false) {
   // nothing was found to replace, so Keep FLAC bins nothing: say so rather than promise a retirement
   const keepFlacText = ['Keep FLAC', 'The FLAC moves into the Roon FLAC library. There is no MP3 of it to bin, '
     + 'so check this is an album you meant to have before keeping it.'];
+  // a refetched album replaces a library copy that is already in the bin
+  const againText = ['Keep FLAC', 'The FLAC moves into the Roon FLAC library, in place of the copy it replaced, which is already in the bin.'];
   const binText = ['Put in the bin', "The FLAC goes in the bin, nothing replaces it, and Soularr won't fetch it again. "
     + 'Undo is in the bin, and Watch puts it back on the wanted list.'];
   const texts = a.dupe ? { ...DUPE_TEXT, refetch: refetchText } : a.health ? { ...DECISION_TEXT, refetch: refetchText }
+    : a.refetched ? { ...DECISION_TEXT, keep_flac: againText, bin_album: binText }
     : a.no_mp3 ? { ...DECISION_TEXT, keep_flac: keepFlacText, bin_album: binText } : DECISION_TEXT;
   const diag = a.diagnosis;
   // with a diagnosis, only its suggestion is highlighted, or nothing when it says listen first
@@ -731,7 +736,7 @@ async function renderAlbum(id, keepMode = false) {
   const watch = a.allowed.includes('watch')
     ? `<label class="switch"><input type="checkbox" role="switch" id="watch" ${a.watch ? 'checked' : ''}><span>Watch for a better copy</span></label>` : '';
   const got = (side) => { const d = day(((a[side] || {}).details || {}).imported); return d ? ` · got ${d}` : ''; };
-  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks${got('mp3')}` : (a.health ? 'In the FLAC library' : 'No MP3'),
+  const totals = [a.mp3 ? `MP3 ${clock(a.mp3.seconds)} · ${a.mp3.tracks.length} tracks${got('mp3')}` : (a.health ? 'In the FLAC library' : a.refetched ? 'Refetched' : 'No MP3'),
     `FLAC ${clock(a.flac.seconds)} · ${a.flac.tracks.length} tracks${got('flac')}`].join('  vs  ');
 
   view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a>${pager}</div>
@@ -772,7 +777,7 @@ async function renderAlbum(id, keepMode = false) {
       // a duplicate's or library album's re-fetch depends on whether Lidarr-FLAC has the album, so it says which
       // keeping a FLAC nothing confirms asks too: it is the one decision that adds an album you never had
       const answer = stageable && !rels && !((a.dupe || a.health) && b.dataset.decide === 'refetch')
-        && !(a.no_mp3 && b.dataset.decide === 'keep_flac') ? true
+        && !(a.no_mp3 && !a.refetched && b.dataset.decide === 'keep_flac') ? true
         : await ask({ title: `${title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
       if (!answer) return;
       const n = neighbours(a).next || neighbours(a).prev;

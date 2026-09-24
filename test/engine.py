@@ -410,6 +410,45 @@ S._releases.clear()                                    # the release test below 
 check(lone["queue"] == "ready" and lone["allowed"] == ["keep_flac", "bin_album", "refetch", "watch"],
       "Put in the bin stands in for the Keep MP3 it can't have")
 
+print("a refetched library album is checked against the copy it replaced")
+tone(f"{DATA}/music-flac/Again/Alb/01.flac", "flac")
+tone(f"{MUSIC}/Sift-bin/old1/MP3-superseded/Again/Alb/01.mp3", "libmp3lame")
+tone(f"{MUSIC}/Sift-bin/rf1/FLAC/Again/Alb/01.flac", "flac")
+json.dump({"entries": [{"id": "old1", "at": "2026-09-16T20:00:00", "decision": "adopted", "label": "x", "ops": [
+    {"op": "move", "from": f"{MUSIC}/MP3-superseded", "to": f"{MUSIC}/Sift-bin/old1/MP3-superseded"}]}]},
+    open(S.BIN, "w"))
+S.CONF["quarantine"] = f"{MUSIC}/MP3-superseded"
+json.dump({"30": {"at": "2026-09-21T12:52:00", "mp3_dirs": [f"{MUSIC}/MP3/Again/Alb"],
+                  "old_flac": f"{MUSIC}/Sift-bin/rf1/FLAC/Again/Alb"}}, open(S.CONF["refetched"], "w"))
+again_plan = {**lone_plan, "flac_id": 30, "artist": "Again", "title": "Alb", "mbid": "mb-30",
+              "flac_dir": f"{DATA}/music-flac/Again/Alb", "dest": f"{MUSIC}/FLAC/Again/Alb",
+              "flac_files": [f"{DATA}/music-flac/Again/Alb/01.flac"]}
+real_match, compared = S.fm.match_tracks, []
+def fake_match(ref, flac, same=True):
+    compared.append(ref)
+    return [{"m": 0, "f": 0, "mp3": os.path.basename(ref[0]), "sim": 1, "same": same}]
+S.fm.match_tracks = fake_match
+ag = S.item_from_plan(dict(again_plan), None)
+check(ag["queue"] == "ready" and ag["status"] == "refetched" and ag["refetched"]["checked"]
+      and compared[-1] == [f"{MUSIC}/Sift-bin/old1/MP3-superseded/Again/Alb/01.mp3"]
+      and "keep_flac" in ag["allowed"] and "bin_album" in ag["allowed"],
+      "matched against the MP3 it first replaced, found in the bin, it is Ready and not badged as having no MP3")
+shutil.rmtree(f"{MUSIC}/Sift-bin/old1")
+ag = S.item_from_plan(dict(again_plan), None)
+check(ag["status"] == "refetched" and compared[-1] == [f"{MUSIC}/Sift-bin/rf1/FLAC/Again/Alb/01.flac"],
+      "with that MP3 gone, against the library FLAC it replaced")
+S.fm.match_tracks = lambda ref, flac: fake_match(ref, flac, same=False)
+ag = S.item_from_plan(dict(again_plan), None)
+check(ag["queue"] == "different" and any("no fingerprint match" in r for r in ag["reasons"]), "a copy that doesn't match goes to Different")
+shutil.rmtree(f"{MUSIC}/Sift-bin/rf1")
+ag = S.item_from_plan(dict(again_plan), None)
+check(ag["status"] == "no_mp3" and ag["queue"] == "ready" and ag["refetched"] == {"on": "2026-09-21T12:52:00", "checked": False}
+      and any("nothing to compare" in r for r in ag["reasons"]), "with both copies gone it waits to be decided on its own, still badged Refetched")
+S.fm.match_tracks = real_match
+os.remove(S.CONF["refetched"]); os.remove(S.BIN)
+shutil.rmtree(f"{DATA}/music-flac/Again")
+S._releases.clear()
+
 print("shared MP3 folder, Keep FLAC")
 tone(f"{DATA}/music-flac/Shared2/Alb/01.flac", "flac")
 tone(f"{MUSIC}/MP3/Shared2/Alb/01.mp3", "libmp3lame")
@@ -670,8 +709,12 @@ calls = [json.loads(l) for l in open(API)]
 check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/Fake") and "77" not in load(conf["migrated"])
       and ["flac", "PUT", "/album/monitor", {"albumIds": [77], "monitored": True}] in calls,
       "which bins it, forgets the migration and monitors the album again")
+rf = load(S.CONF["refetched"], {}).get("77")
+check(rf and rf["old_flac"].startswith(f"{MUSIC}/Sift-bin/") and rf["old_flac"].endswith("/FLAC/Fake/Copy")
+      and os.path.isdir(rf["old_flac"]), "and remembers the copy it replaced, for the new one to be checked against")
 sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
-check(os.path.isfile(f"{MUSIC}/FLAC/Fake/Copy/01.flac") and "77" in load(conf["migrated"]), "and undo restores both")
+check(os.path.isfile(f"{MUSIC}/FLAC/Fake/Copy/01.flac") and "77" in load(conf["migrated"])
+      and "77" not in load(S.CONF["refetched"], {}), "and undo restores both")
 json.dump(migrated0, open(conf["migrated"], "w"))
 shutil.rmtree(f"{MUSIC}/FLAC/Fake"); shutil.rmtree(f"{MUSIC}/FLAC/Well")
 

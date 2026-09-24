@@ -8,7 +8,7 @@ the MP3 you already have and sorted into a queue:
 
 | Queue | Meaning |
 |---|---|
-| Ready | Exact match: every FLAC file passes `flac -t`, every MP3 track matches a FLAC track by fingerprint, and the FLAC isn't suspect. Albums with **no MP3 to replace** wait here too, badged: nothing confirms them, so Stage all leaves them out and each is decided on its own |
+| Ready | Exact match: every FLAC file passes `flac -t`, every MP3 track matches a FLAC track by fingerprint, and the FLAC isn't suspect. Albums with **no MP3 to replace** wait here too, badged: nothing confirms them, so Stage all leaves them out and each is decided on its own. A **refetched** album (sent back from Library health) is fingerprint-checked instead against the copy it replaced, the MP3 it was first retired against or else the old library FLAC, while that copy is still in the bin: matching, it is Ready and goes through Stage all; not, it goes to Different; with both gone, it waits here badged Refetched to be decided on its own |
 | Suspect FLAC | Most FLAC tracks stop below 20.5 kHz, as a FLAC made from an MP3 does (`SUSPECT_HZ` in `bin/sift.py`) |
 | Different or unconfirmed version | Some MP3 tracks have no fingerprint match in the FLAC |
 | Doesn't line up | Fewer tracks, a noticeably different length, or an MP3 folder shared with another album |
@@ -29,7 +29,8 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 - `~/.local/state/sift/`: `queue.json`, `bin.json`, `overrides.json`, `history.json` (what left
   the bin: emptied, undone, failed in a batch), `notify.json` (the last jot), `covers/`,
   `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `staged.json` (decisions
-  waiting for approval), `pending/` (decisions in
+  waiting for approval), `refetched.json` (library albums refetched from Library health and
+  the copies they replaced), `pending/` (decisions in
   progress), the `lock` files and the two cron logs.
 - Cron runs `sift.py check` at 25 minutes past every second hour, just after `soularr_maintenance.py`.
   If albums have arrived that weren't there at the last jot, it leaves Simon a jot in
@@ -98,6 +99,7 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 | Keep MP3 (duplicate) | FLAC → bin | none |
 | Put in the bin (no MP3) | FLAC → bin | FLAC unmonitored, recorded in `flac-returned.json` so nothing re-monitors it |
 | Put in the bin (health) | FLAC → bin | none |
+| Get a better FLAC (health) | FLAC → bin | migration record dropped and the album monitored, if Lidarr-FLAC has it; the replaced copies recorded in `refetched.json` |
 | Block this user | none | Soularr's `ignored_users` gains the user |
 
 Every decision is recorded step by step in `bin.json`, so **Undo** reverses it exactly:

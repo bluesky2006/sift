@@ -54,6 +54,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
     { id: 4, artist: 'Cband', title: 'Next One', queue: 'different', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+      refetched: { on: '2026-09-21T12:52:00', checked: true },
       releases: [{ release: 'r-1', title: 'Next One', date: '1999-01-01', format: 'CD', country: 'UK', label: 'L', tracks: 1, selected: true },
         { release: 'r-2', title: 'Next One (deluxe)', date: '2010-01-01', format: 'CD', country: 'UK', label: 'L', tracks: 2, selected: false }],
       diagnosis: { kind: 'missing', suggest: 'refetch', text: 'The FLAC is missing 1 track the MP3 has: A.' },
@@ -104,6 +105,9 @@ try {
   await page.click('[data-tab="suspect"]');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a tab shows its queue; a suspect album shows where its FLAC stops');
   check(await page.locator('#q-ready').count() === 0 && await page.evaluate(() => localStorage.getItem('sift-tab')) === 'suspect', 'and the tab is remembered');
+  await page.click('[data-tab="different"]');
+  check((await page.locator('#q-different a.row', { hasText: 'Next One' }).locator('.badge', { hasText: 'Refetched' }).textContent()).startsWith('Refetched 21 Sep')
+    && await page.locator('#q-different .badge', { hasText: 'No MP3' }).count() === 0, 'a refetched album says when it went back, not that it has no MP3');
   await page.click('[data-tab="ready"]');
 
   console.log('search, sort, select');
