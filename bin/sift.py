@@ -59,6 +59,8 @@ CONF = {
 }
 if os.environ.get("SIFT_CONF"):                    # the test suite's sandbox
     CONF.update(json.load(open(os.environ["SIFT_CONF"])))
+if os.environ.get("SIFT_CACHE"):                   # likewise, so tests never touch the real check cache
+    fm.CACHE = os.environ["SIFT_CACHE"]
 
 QUEUE = os.path.join(STATE, "queue.json")
 BIN = os.path.join(STATE, "bin.json")
@@ -251,7 +253,7 @@ def measure(path):
         if found and float(found[-1]) > -70:
             lufs = float(found[-1])
     except (subprocess.TimeoutExpired, OSError):
-        pass
+        return e                                  # not cached: measured again next time
     with fm._cache_lock:
         e["cutoff"], e["lufs"] = cutoff, lufs
     return e
@@ -1200,7 +1202,7 @@ def mount_of(path):
     for m in CONF["bins"]:
         if path == m or path.startswith(m + "/"):
             return m
-    raise SystemExit(f"refusing: {path} is not on a drive with a bin")
+    raise RuntimeError(f"refusing: {path} is not on a drive with a bin")   # caught by rollback, unlike SystemExit
 
 
 def require_mounted(m):
@@ -1578,6 +1580,14 @@ def strip_id3(folders=None):
                     en.journal()
                     f.seek(-128, os.SEEK_END)
                     f.truncate()
+                if subprocess.run(["flac", "-t", "-s", p], capture_output=True).returncode != 0:
+                    # the tag wasn't what tripped the decoder: put it back as it was
+                    with open(p, "ab") as f:
+                        f.write(tag)
+                    en.d["ops"].pop()
+                    en.journal()
+                    log(f"strip-id3: put the tag back, the file still fails flac -t without it: {p}")
+                    continue
                 fm.file_entry(p)                   # the file changed: its cache record starts over
                 done += 1
             if not en.d["ops"]:
@@ -2138,6 +2148,10 @@ def remove_tree(path):
 
 def adopt(path, label):
     path = os.path.realpath(path)
+    m = mount_of(path)
+    roots = {m, CONF["flac_src"], CONF["mp3_root"], CONF["flac_dest"], *CONF["bins"].values()}
+    if path in roots or any(path.startswith(os.path.realpath(b) + "/") for b in CONF["bins"].values()):
+        raise RuntimeError(f"refusing: {path} is a library root, a bin, or already in one")
     with Lock():
         item = {"id": None, "artist": label, "title": "(added from the shell)"}
         en = Entry("adopted", item)

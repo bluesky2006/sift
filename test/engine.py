@@ -34,7 +34,7 @@ def tone(path, fmt):
 
 
 def sift(*args, ok=True):
-    env = {**os.environ, "SIFT_STATE": STATE, "SIFT_CONF": f"{T}/conf.json",
+    env = {**os.environ, "SIFT_STATE": STATE, "SIFT_CONF": f"{T}/conf.json", "SIFT_CACHE": f"{T}/cache.json",
            "SIFT_FAKE_API": API, "SIFT_NO_REBUILD": "1"}
     r = subprocess.run([sys.executable, SIFT, *args], env=env, capture_output=True, text=True)
     if ok and r.returncode:
@@ -979,6 +979,11 @@ r = sift("resolve", "36", "keep_flac", ok=False)
 check(r.returncode != 0 and open(conf["migrated"]).read() == "{not json" and os.path.isdir(f"{DATA}/music-flac/Garbled/Alb")
       and os.path.isdir(f"{MUSIC}/MP3/Garbled/Alb"), "so does a ledger, which is kept too")
 open(conf["migrated"], "w").write(good_ledger)
+
+print("adopt")
+for root in (f"{MUSIC}/FLAC", f"{MUSIC}/MP3", MUSIC, f"{MUSIC}/Sift-bin"):
+    r = sift("adopt", root, "x", ok=False)
+    check(r.returncode != 0 and "refusing" in r.stdout + r.stderr and os.path.isdir(root), f"adopt refuses {os.path.relpath(root, T)}")
 
 print("health with the library missing")
 json.dump({"albums": {f"{MUSIC}/FLAC/Well/Fine": {"sig": [1]}}}, open(S.HEALTH, "w"))
