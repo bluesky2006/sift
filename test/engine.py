@@ -1,3 +1,4 @@
+import base64
 #!/usr/bin/env python3
 """Sift engine tests, in a throwaway sandbox: real moves, real rsync, fake Lidarr.
 
@@ -1009,6 +1010,59 @@ except RuntimeError as e:
     raised = str(e)
 S.CONF["flac_dest"] = conf["flac_dest"]
 check(raised and f"{MUSIC}/FLAC/Well/Fine" in load(S.HEALTH)["albums"], "so is a library folder with nothing in it")
+
+print("a rollback that strands a move")
+json.dump({"entries": []}, open(f"{STATE}/bin.json", "w"))
+tone(f"{DATA}/music-flac/Split/Alb/01.flac", "flac")
+tone(f"{MUSIC}/FLAC/Split/Alb/02.flac", "flac")                         # half went back, half didn't
+op = {"op": "move", "from": f"{DATA}/music-flac/Split/Alb", "to": f"{MUSIC}/FLAC/Split/Alb"}
+real_move = S.move
+def stranded(src, dst):
+    raise S.Stranded("files on both sides")
+S.move, failed = stranded, []
+S.undo_ops([op], failed)
+S.move = real_move
+split = {"id": "20260928-000000-split", "at": S.now(), "decision": "keep_flac", "label": "Split — Alb (rollback incomplete: undo to put it back)",
+         "interrupted": True, "ops": failed}
+check(failed and failed[0].get("pending") and S.undo_problems(split, [split]) == [],
+      "a move the rollback strands is marked pending, so Undo will merge it back")
+os.makedirs(f"{DATA}/Sift-bin/{split['id']}", exist_ok=True)
+json.dump({"entries": [split]}, open(f"{STATE}/bin.json", "w"))
+r = sift("empty-bin")
+check(r.returncode == 0 and [e["id"] for e in load(f"{STATE}/bin.json")["entries"]] == [split["id"]]
+      and os.path.isdir(f"{DATA}/Sift-bin/{split['id']}"), "Empty bin keeps an entry with a move to finish")
+r = sift("undo", split["id"])
+check(r.returncode == 0 and sorted(os.listdir(f"{DATA}/music-flac/Split/Alb")) == ["01.flac", "02.flac"]
+      and not os.path.exists(f"{MUSIC}/FLAC/Split"), "and Undo puts the album back together")
+
+print("an ID3v1 undo cut off after the tag went back")
+tagfile = f"{T}/tagged.flac"
+tag = b"TAG" + b"x" * 125
+open(tagfile, "wb").write(b"fLaC" + b"\0" * 300 + tag)                  # already appended
+idop = {"op": "id3v1", "file": tagfile, "tag": base64.b64encode(tag).decode()}
+idn = {"id": "id3", "ops": [idop]}
+check(S.undo_problems(idn, [idn]) == [], "is not refused")
+S.undo_ops([idop])
+check(open(tagfile, "rb").read().count(b"TAG") == 1, "and the tag is not appended twice")
+
+print("a measurement ffmpeg fails")
+tone(f"{T}/failing.flac", "flac")
+def ffmpeg_dies(cmd, *a, **k):
+    if cmd[0] == "ffmpeg" and "-filter_complex" in cmd:
+        return subprocess.CompletedProcess(cmd, -9, b"", b"Killed")
+    return real_run(cmd, *a, **k)
+subprocess.run = ffmpeg_dies
+e = S.measure(f"{T}/failing.flac")
+subprocess.run = real_run
+check("cutoff" not in e and "lufs" not in e, "is not cached, so it is measured again")
+
+print("a journal that won't parse")
+os.makedirs(f"{STATE}/pending", exist_ok=True)
+open(f"{STATE}/pending/garbled.json", "w").write('{"id": "half')
+r = sift("empty-bin", ok=False)
+check(r.returncode != 0 and "won't parse" in r.stdout + r.stderr and os.path.isfile(f"{STATE}/pending/garbled.json"),
+      "stops the job before Empty bin can delete its files, and is kept")
+os.remove(f"{STATE}/pending/garbled.json")
 
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")

@@ -307,6 +307,20 @@ try {
   for (let i = 0; i < 60; i++) lock.startAttempt(`100.64.1.${i}`);
   check(!lock.startAttempt('100.64.0.3'), 'but many devices together still hit a limit');
 
+  console.log('audio while a job runs');
+  await new Promise((res) => setTimeout(res, 1500));                   // any earlier job done
+  check((await req('/api/check', { method: 'POST', body: {}, csrf: csrf2 })).status < 300, 'a job starts');
+  check((await req('/api/audio/1/flac/0')).status === 503, 'and none opens until the job is done');
+  await new Promise((res) => setTimeout(res, 1500));
+  check((await req('/api/audio/1/flac/0')).status === 200, 'then play again');
+
+  console.log('a damaged staged.json');
+  fs.writeFileSync(path.join(STATE, 'staged.json'), '{"entries": [{"id": 1, "deci');
+  check((await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf: csrf2 })).status === 500
+    && fs.readFileSync(path.join(STATE, 'staged.json'), 'utf8') === '{"entries": [{"id": 1, "deci',
+    'staging refuses, and does not write over it');
+  fs.rmSync(path.join(STATE, 'staged.json'));
+
   console.log('a damaged auth.json');
   fs.writeFileSync(path.join(T, 'auth.json'), '{"salt": "half-writ');
   check((await req('/api/auth/status')).status === 500

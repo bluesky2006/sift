@@ -105,7 +105,7 @@ Nothing moves until you approve a decision in the app. Nothing is deleted until 
 Every decision is recorded step by step in `bin.json`, so **Undo** reverses it exactly:
 files, monitoring and ledger entries. Bins are `/mnt/roon-music/Sift-bin` and
 `/mnt/roon-data/Sift-bin`, so a move into the bin stays on the same drive and is instant.
-**Empty bin** asks for the password again and is the only delete.
+**Empty bin** asks for the password again and is the only delete. It leaves any entry with a move still to finish (an album split between folders): undo those first.
 
 Undo checks everything first and changes nothing if it can't finish: a file already back in
 place, a drive not mounted, or a later decision on the same album still in the bin (undo that

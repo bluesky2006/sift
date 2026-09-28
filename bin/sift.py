@@ -240,6 +240,8 @@ def measure(path):
                             "-filter_complex", graph, "-map", "[v]", "-frames:v", "1",
                             "-f", "rawvideo", "-pix_fmt", "gray", "-"],
                            capture_output=True, timeout=600)
+        if r.returncode != 0:
+            return e                              # killed or failed: not cached, measured again next time
         err = r.stderr.decode("utf-8", "replace")
         rate = re.search(r"Audio: .*?, (\d+) Hz", err)
         if len(r.stdout) == w * h and rate:
@@ -1396,9 +1398,12 @@ def undo_ops(ops, failed=None, progress=None):
         try:
             if o["op"] == "move":
                 if not o.get("pending") or not os.path.exists(o["from"]):
-                    if progress and not o.get("pending"):
-                        o["pending"] = True           # cut off from here, merge_back finishes it
-                        progress()
+                    if not o.get("pending"):
+                        # cut off from here, merge_back finishes it. A rollback passes no
+                        # progress but saves what fails, so the flag must be set either way
+                        o["pending"] = True
+                        if progress:
+                            progress()
                     move(o["to"], o["from"])
                 elif os.path.exists(o["to"]):
                     merge_back(o["to"], o["from"])
@@ -1417,8 +1422,9 @@ def undo_ops(ops, failed=None, progress=None):
                                  for c in o["changes"]])
                 rename_in_overrides(o["album"], {c["to"]: c["from"] for c in o["changes"]})
             elif o["op"] == "id3v1":
-                with open(o["file"], "ab") as f:
-                    f.write(base64.b64decode(o["tag"]))
+                if not tag_is_back(o):                # cut off after the append last time
+                    with open(o["file"], "ab") as f:
+                        f.write(base64.b64decode(o["tag"]))
             elif o["op"] == "ledger":
                 data = load_record(CONF[o["file"]], {})
                 if o["before"] is None:
@@ -1491,7 +1497,9 @@ def recover():
     except FileNotFoundError:
         return
     for name in names:
-        entry = fm.load_json(os.path.join(PENDING, name), None)
+        # one that won't parse stops the job: skipped, its files would sit in the bin with
+        # no entry naming them, and Empty bin deletes those
+        entry = load_record(os.path.join(PENDING, name), None)
         if not entry:
             continue
         entry["interrupted"] = True
@@ -1536,12 +1544,23 @@ def undo_problems(entry, entries):
         elif o["op"] == "id3v1":
             if not os.path.isfile(o["file"]):
                 problems.append(f"missing: {o['file']}")
-            elif has_id3v1(o["file"]):
+            elif has_id3v1(o["file"]) and not tag_is_back(o):
                 problems.append(f"already has a tag on the end: {o['file']}")
     return problems
 
 
 # ---- ID3v1 tags on the end of old rips ---------------------------------------------
+
+def tag_is_back(o):
+    """An id3v1 op whose tag is already on the end: an undo that stopped after putting it back."""
+    tag = base64.b64decode(o["tag"])
+    with open(o["file"], "rb") as f:
+        f.seek(0, os.SEEK_END)
+        if f.tell() < len(tag):
+            return False
+        f.seek(-len(tag), os.SEEK_END)
+        return f.read() == tag
+
 
 def has_id3v1(path):
     with open(path, "rb") as f:
@@ -2105,6 +2124,10 @@ def older_than(entries, days):
     return [e for e in entries if datetime.fromisoformat(e["at"]) < cut]
 
 
+def unfinished(entry):
+    return any(o["op"] == "move" and o.get("pending") and not o.get("reversed") for o in entry.get("ops", []))
+
+
 def empty_bin(days=None):
     """Delete everything in the bin, or with `days` only the entries older than that. One
     entry at a time, saving bin.json after each, so a delete that fails partway never leaves
@@ -2112,6 +2135,10 @@ def empty_bin(days=None):
     with Lock():
         b = load_record(BIN, {"entries": []})
         gone = b["entries"] if days is None else older_than(b["entries"], days)
+        # a move cut off partway may have left an album split between library folders:
+        # its entry is the only record of that, so it stays until Undo finishes it
+        kept = [e for e in gone if unfinished(e)]
+        gone = [e for e in gone if not unfinished(e)]
         roots = bin_roots()
         emptied, error = [], None
         for e in gone:
@@ -2126,13 +2153,16 @@ def empty_bin(days=None):
             save_record(BIN, b)
         if days is None and not error:
             # leftovers no entry names, e.g. from before bin.json existed
+            keep = {e["id"] for e in kept}
             for real in roots:
                 for name in os.listdir(real):
-                    remove_tree(os.path.join(real, name))
+                    if name not in keep:
+                        remove_tree(os.path.join(real, name))
         freed = sum(e.get("bytes", 0) for e in emptied)
         if emptied:
             remember("emptied", {"at": now(), "bytes": freed, "entries": [summary(e) for e in emptied]})
     log(f"emptied bin{f' (older than {days} days)' if days else ''}: {len(emptied)} entries, {freed / 1e9:.1f} GB"
+        + (f"; kept {len(kept)} with a move to finish: undo them first" if kept else "")
         + (f"; stopped at {error}" if error else ""))
     if error:
         raise RuntimeError(f"emptying stopped at {error}")

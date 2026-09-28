@@ -1,14 +1,15 @@
 // Drives the real page in headless Chrome against a throwaway instance with a stub engine,
 // to catch what the API tests can't: a handler that doesn't fire, a mode that doesn't
-// render, a script error. Needs playwright-core in /tmp/node_modules and Chrome at
-// /usr/bin/google-chrome, as Switchboard's ui test does.
+// render, a script error. Needs Chrome at /usr/bin/google-chrome and playwright-core, taken
+// from Switchboard's node_modules (or PLAYWRIGHT_CORE), since /tmp is wiped at every boot.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from '/tmp/node_modules/playwright-core/index.mjs';
+const { chromium } = await import(process.env.PLAYWRIGHT_CORE
+  || path.join(os.homedir(), 'switchboard/node_modules/playwright-core/index.mjs'));
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const T = fs.mkdtempSync(path.join(os.tmpdir(), 'sift-ui-'));

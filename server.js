@@ -99,7 +99,12 @@ async function readState(name, fallback) {
     const data = JSON.parse(await fsp.readFile(file, 'utf8'));
     cache.set(file, { mtime: st.mtimeMs, data });
     return data;
-  } catch { return fallback; }
+  } catch (e) {
+    // only a missing file is empty: one that won't parse gives an error, where the fallback
+    // would show an empty queue and let the next stage write over every staged decision
+    if (e.code === 'ENOENT') return fallback;
+    throw new Error(`${name} can't be read: ${e.message}`);
+  }
 }
 
 // Keys starting with _ hold paths; they never leave the server, at any depth.
@@ -160,6 +165,7 @@ let job = null;
 function startJob(kind, args, label) {
   if (job && !job.done) return null;
   stopSpectra();
+  stopStreams();
   const j = { id: Date.now().toString(36), kind, label, started: Date.now(), output: '', done: false, ok: null };
   const child = spawn(PYTHON, [ENGINE, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
   const take = (b) => { j.output = (j.output + b.toString()).slice(-8000); };
@@ -174,10 +180,16 @@ function startJob(kind, args, label) {
 }
 
 // ---- audio -----------------------------------------------------------------
+// A job closes every file being played, as it does spectrograms, and refuses new ones until
+// it's done: a file held open while a decision moves it fails the move on the NTFS drive.
+
+const streams = new Set();
+function stopStreams() { for (const s of streams) s.destroy(); }
 
 async function streamFile(req, res, file) {
   const real = await fsp.realpath(file).catch(() => null);
   if (!real || !AUDIO_ROOTS.some((r) => real.startsWith(r + '/'))) return send(res, 404, 'not found');
+  if (job && !job.done) return send(res, 503, 'busy');
   const st = await fsp.stat(real);
   const type = real.toLowerCase().endsWith('.flac') ? 'audio/flac' : 'audio/mpeg';
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
@@ -200,7 +212,10 @@ async function streamFile(req, res, file) {
   // pipeline, not pipe: when the browser drops the request (a seek, a skipped track, a
   // preload it no longer wants) the file is closed at once. A file left open here and then
   // moved by a decision lingers on the NTFS drive as .fuse_hidden and fails the move.
-  pipeline(fs.createReadStream(real, { start, end }), res, () => {});
+  if (job && !job.done) return res.destroy();          // a job started while we looked
+  const s = fs.createReadStream(real, { start, end });
+  streams.add(s);
+  pipeline(s, res, () => streams.delete(s));
 }
 
 // ---- spectrograms ----------------------------------------------------------
@@ -551,8 +566,10 @@ async function handle(req, res) {
         if (!go.length) return 'none';
         const spec = go.map((e) => [e.id, e.decision, ...(e.release != null ? [e.release] : [])].join(':')).join(',');
         audit({ event: 'apply-staged', entries: go });
-        const j = startJob('apply-staged', ['apply-staged', spec], `Approving ${go.length} decision${go.length === 1 ? '' : 's'}`);
+        // taken out before the job starts, so a failed write can't leave them to approve twice
         await writeStaged(staged.filter((e) => !want.has(e.id)));
+        const j = startJob('apply-staged', ['apply-staged', spec], `Approving ${go.length} decision${go.length === 1 ? '' : 's'}`);
+        if (!j) { await writeStaged(staged); return 'busy'; }
         return { j, go };
       });
       if (r === 'busy') return busy();
