@@ -1576,6 +1576,10 @@ def strip_id3(folders=None):
     matches its own header MD5. Roon ignores the tag; the reference decoder trips over it,
     which is how these files were flagged as damaged. One bin entry per album folder holds
     each tag, so undo puts them back byte for byte."""
+    lib = os.path.realpath(CONF["flac_dest"]) + "/"
+    for f in folders or []:
+        if not os.path.realpath(f).startswith(lib):
+            raise RuntimeError(f"refusing: {f} is not in the FLAC library")
     folders = folders or [path for _, _, path in album_folders(CONF["flac_dest"])]
     done = 0
     for folder in folders:
@@ -2181,7 +2185,8 @@ def remove_tree(path):
 def adopt(path, label):
     path = os.path.realpath(path)
     m = mount_of(path)
-    roots = {m, CONF["flac_src"], CONF["mp3_root"], CONF["flac_dest"], *CONF["bins"].values()}
+    # resolved like path, so a root reached through a symlink still counts
+    roots = {os.path.realpath(r) for r in (m, CONF["flac_src"], CONF["mp3_root"], CONF["flac_dest"], *CONF["bins"].values())}
     if path in roots or any(path.startswith(os.path.realpath(b) + "/") for b in CONF["bins"].values()):
         raise RuntimeError(f"refusing: {path} is a library root, a bin, or already in one")
     with Lock():

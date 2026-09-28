@@ -886,6 +886,8 @@ r = sift("undo", en["id"])
 check(r.returncode == 0 and open(f"{D}/01.flac", "rb").read() == tagged, "undo puts the tag back byte for byte")
 check(sift("strip-id3", D).returncode == 0 and open(f"{D}/01.flac", "rb").read() == raw, "and it can be cut again")
 
+check(sift("strip-id3", f"{DATA}/music-flac", ok=False).returncode != 0, "strip-id3 refuses a folder outside the library")
+
 print("a move that can't be put back")
 json.dump(conf, open(f"{T}/conf.json", "w"))
 S.CONF.update(conf)

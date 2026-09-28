@@ -114,11 +114,14 @@ const pub = (v) => Array.isArray(v) ? v.map(pub)
 
 // Engine output quotes the paths it failed on. Those stay in audit.log; the browser gets
 // "…" in their place, quoted or not. Python quotes a path holding an apostrophe in double
-// quotes ("…/Guns N' Roses/…"), so each kind of quote is taken on its own.
+// quotes ("…/Guns N' Roses/…"), so each kind of quote is taken on its own, and a single
+// quote only closes one before punctuation or a space. An unquoted path may hold brackets
+// ("Album (Deluxe)/01.flac"), so it runs on to a ": ", a ";", the engine's "(2 left)", or a
+// bracket closing the message; past the end is safer than stopping short.
 const scrub = (text) => String(text || '')
   .replace(/"[^"\n]*\/[^"\n]*"/g, '"…"')
-  .replace(/'[^'\n]*\/[^'\n]*'/g, "'…'")
-  .replace(/(^|[\s(=:])\/[^\n;()]*?(?=: |:$|,? \(|;|\)|\n|$)/gm, '$1…');
+  .replace(/'[^'\n]*\/[^\n]*?'(?=[\s:;,)]|$)/gm, "'…'")
+  .replace(/(^|[\s(=:])\/[^\n;]*?(?=: |:$|,? \(\d+ left|;|\)(?=[;:,]|$|\s+-\s)|\n|$)/gm, '$1…');
 const jobView = (j) => j && { kind: j.kind, label: j.label, done: j.done, ok: j.ok, output: scrub(j.output) };
 
 // ---- staging ---------------------------------------------------------------
@@ -361,8 +364,14 @@ async function handle(req, res) {
     return json(res, 200, { ok: true }, { 'Set-Cookie': cookie(auth.makeSession(a)) });
   }
   if (p === '/api/auth/logout' && req.method === 'POST') {
-    // ends every session, this one and any other device's
-    if (authed) { await auth.endSessions(a); audit({ event: 'logout', ip: req.socket.remoteAddress }); }
+    // ends every session, this one and any other device's. CSRF too: the browser counts
+    // JotScribe and Switchboard, on the same IP, as the same site, so SameSite alone would
+    // let a page there sign every device out
+    if (authed) {
+      if (!auth.validCsrf(req.headers['x-csrf'], sid, a)) return json(res, 403, { error: 'bad csrf token' });
+      await auth.endSessions(a);
+      audit({ event: 'logout', ip: req.socket.remoteAddress });
+    }
     return json(res, 200, { ok: true }, { 'Set-Cookie': `${auth.COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0` });
   }
 
@@ -637,12 +646,21 @@ async function pruneSpectra() {
 pruneSpectra();
 setInterval(pruneSpectra, 86400000).unref();
 for (const host of HOSTS) {
-  http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     handle(req, res).catch((e) => {
       if (e instanceof BadBody) return json(res, 400, { error: e.message });
       console.error('[sift]', e);
       if (!res.headersSent) json(res, 500, { error: 'server error' });
       else res.end();
     });
-  }).listen(PORT, host, () => console.log(`[sift] listening on ${host}:${PORT}`));
+  });
+  // at boot the tailnet address turns up a few seconds after we start: wait for it here,
+  // since a user unit can't order itself after tailscaled
+  let told = false;
+  server.on('error', (e) => {
+    if (e.code !== 'EADDRNOTAVAIL') throw e;
+    if (!told) { console.log(`[sift] ${host} not up yet, waiting for it`); told = true; }
+    setTimeout(() => server.listen(PORT, host), 2000);
+  });
+  server.listen(PORT, host, () => console.log(`[sift] listening on ${host}:${PORT}`));
 }

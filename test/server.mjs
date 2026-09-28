@@ -58,6 +58,8 @@ fs.writeFileSync(path.join(STATE, 'audit.log'), [
   { label: 'Broke — Album', output: "rsync '/secret/music/Broke/Album': (2 left)\n" },
   { label: 'Guns — Appetite', output: "File exists: \"/secret/Guns N' Roses/Appetite\"\n" },
   { label: 'Dst — Path', output: 'rsync dst:/secret/dst/x failed\n' },
+  { label: 'Deluxe — Album', output: '/secret/Art/Album (Deluxe)/01.flac: bad\n' },
+  { label: 'Its — Album', output: "open '/secret/a/It's/b.flac': denied\n" },
 ].map((e) => JSON.stringify({ at: '2026-09-11T10:00:00Z', event: 'job-done', kind: 'keep_flac', ok: false, ...e }) + '\n').join(''));
 
 // a server already on the port (another run) would answer in our place, and every check
@@ -148,6 +150,8 @@ try {
   check(why('Broke — Album') === "rsync '…': (2 left)", 'a failed job says why, without the path');
   check(why('Guns — Appetite') === 'File exists: "…"' && why('Dst — Path') === 'rsync dst:…',
     `with a double-quoted path holding an apostrophe, or one straight after a colon (${why('Guns — Appetite')} | ${why('Dst — Path')})`);
+  check(why('Deluxe — Album') === '…: bad' && why('Its — Album') === "open '…': denied",
+    `with brackets in the path, or an apostrophe in a single-quoted one (${why('Deluxe — Album')} | ${why('Its — Album')})`);
 
   console.log('spectrograms');
   let sp = await req('/api/spectrum/2/flac/0');
@@ -279,6 +283,8 @@ try {
 
   console.log('sign out');
   const old = jar;
+  check((await req('/api/auth/logout', { method: 'POST' })).status === 403 && (await req('/api/state')).status === 200,
+    'signing out needs the CSRF token, so a page on a sibling port can\'t');
   await req('/api/auth/logout', { method: 'POST', csrf });
   jar = old;
   check((await req('/api/state')).status === 401, 'signing out ends the session, even if its cookie is kept');

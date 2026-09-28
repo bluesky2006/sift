@@ -1286,7 +1286,7 @@ $('paths').onclick = () => {
   pathsLabel();
   if (location.hash.startsWith('#/album/')) route();
 };
-$('logout').onclick = async () => { await fetch('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
+$('logout').onclick = async () => { await fetch('/api/auth/logout', { method: 'POST', headers: { 'X-CSRF': csrf || '' } }); location.href = '/'; };
 setInterval(() => { if (!polling) loadState().then(() => { if ((location.hash || '#/') === '#/') renderList(); }).catch(() => {}); }, 60000);
 
 (async () => {

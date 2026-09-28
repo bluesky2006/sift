@@ -538,6 +538,26 @@ try {
   await page.evaluate(() => { location.hash = '#/history'; });
   await page.waitForSelector('.tiles');
   check((await page.locator('.histrow .rtitle').first().textContent()) === 'Band — Record' && await page.locator('.tile').count() === 4, 'history lists decisions with totals');
+  console.log('hostile tag text');
+  // tags and Lidarr text are the only strings the page shows that no one here wrote
+  const queueFile2 = path.join(STATE, 'queue.json');
+  const clean = fs.readFileSync(queueFile2, 'utf8');
+  const bad = '<img src=x onerror="window.pwned=1">';
+  const hostile = JSON.parse(clean);
+  const h = hostile.items.find((i) => i.id === 1);
+  Object.assign(h, { artist: bad, title: bad, reasons: [bad] });
+  h.flac.tracks[0].title = bad;
+  fs.writeFileSync(queueFile2, JSON.stringify(hostile));
+  await page.goto(BASE + '/app');
+  await page.waitForSelector('.queue');
+  await page.click('[data-tab="different"]');
+  await page.click('a.row[href="#/album/1"]');
+  await page.waitForSelector('.tracks');
+  await page.waitForTimeout(500);
+  check(await page.evaluate(() => window.pwned === undefined && !document.querySelector('img[src="x"]'))
+    && (await page.content()).includes('&lt;img src=x'), 'is shown as text, never run');
+  fs.writeFileSync(queueFile2, clean);
+
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {
   await browser.close();
