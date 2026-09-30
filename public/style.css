@@ -314,8 +314,15 @@ dialog p { margin: 0; color: var(--muted); }
 .listtools input[type=search] { flex: 1; min-width: 0; font: inherit; padding: 9px 12px; border-radius: 11px;
   border: 1px solid var(--line); color: var(--text); box-shadow: var(--shadow); transition: border-color .2s, box-shadow .2s;
   background: var(--panel); }
-.listtools select { font: inherit; padding: 9px 8px; border-radius: 11px; border: 1px solid var(--line);
-  background: var(--panel); color: var(--text); max-width: 34%; box-shadow: var(--shadow); }
+.listtools select { font: inherit; padding: 9px 32px 9px 12px; border-radius: 11px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--text); max-width: 34%; box-shadow: var(--shadow);
+  /* the browser's own arrow is drawn oversize and off-centre, so hide it and draw one that matches the icons */
+  appearance: none; -webkit-appearance: none; position: relative;
+  background-image: url(/chevron.svg);
+  background-repeat: no-repeat; background-position: right 10px center; background-size: 16px; }
+@media (prefers-color-scheme: dark) {
+  .listtools select { background-image: url(/chevron-dark.svg); }
+}
 .row.picking { cursor: pointer; }
 .row.picking .pick { width: 20px; height: 20px; flex: none; margin: 0; }
 .selbar { background: var(--glass); -webkit-backdrop-filter: blur(18px) saturate(1.6); backdrop-filter: blur(18px) saturate(1.6);
@@ -378,3 +385,7 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 .play, .skip, .unpair, .arrows button, button.stat { position: relative; }
 .play::before, .skip::before, .arrows button::before, button.stat::before { content: ""; position: absolute; inset: -8px; }
 .unpair::before { content: ""; position: absolute; inset: -12px; }
+
+/* a picture being dragged over an album page: the cover is where it lands */
+body.dropping .cover { outline: 3px dashed var(--accent); outline-offset: 4px; }
+body.dropping .ahead::after { content: "Drop the picture to set the artwork"; color: var(--accent); font-size: 13px; font-weight: 600; }

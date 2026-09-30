@@ -26,8 +26,14 @@ const QUEUES = [
   ['health', 'Library health', 'Albums already in the Roon FLAC library with files that fail flac -t or stop short like a converted MP3, found by the nightly check. Nothing replaces them if you bin them.'],
   ['dupes', 'Library duplicates', 'Albums in both the Roon FLAC library and the MP3 library, matched by folder name. Keep FLAC puts the MP3 in the bin; Keep MP3 puts the FLAC in the bin.'],
   ['arriving', 'Arriving', 'Imported in the last few hours; checked once Soularr has finished with them.'],
+  ['downloads', 'Downloads', "Folders downloaded by hand in slskd. Soularr only imports what it fetched itself, so these wait here until you import them. "
+    + 'Import asks Lidarr to move and rename the whole folder into the library in one go; the album then arrives in the queue like any other.'],
 ];
 const SHORT = { staged: 'Staged', different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health' };
+// a hand-made download, shown in the list beside the albums: what its row says
+const downloadItem = (d) => ({ ...d, queue: 'downloads', download: true, artist: d.artist || d.name,
+  reasons: [d.busy ? 'Still downloading' : d.blocked || (d.lidarr ? `Files as ${d.lidarr.artist} — ${d.lidarr.title}` : '')] });
+const allItems = () => [...state.items, ...(state.downloads || []).map(downloadItem)];
 const DECISION_TEXT = {
   keep_flac: ['Keep FLAC', 'The FLAC moves into the Roon FLAC library and the MP3 goes in the bin.'],
   keep_mp3: ['Keep MP3', "The FLAC goes in the bin and Soularr won't fetch this album again."],
@@ -56,6 +62,9 @@ const selected = new Set();
 // Icons: 24px strokes in currentColor, so they take each button's colour. Media ones are filled.
 const ICONS = {
   check: 'M20 6 9 17l-5-5',
+  image: 'M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21',
+  inbox: 'M22 12h-6l-2 3h-4l-2-3H2M5.5 5h13l3.5 7v7H2v-7z',
+  plus: 'M12 5v14M5 12h14',
   checks: 'M18 6 7 17l-5-5M22 10l-7.5 7.5L13 16',
   music: 'M9 18V5l12-2v13M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM21 16a3 3 0 1 1-6 0 3 3 0 0 1 6 0z',
   refresh: 'M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6',
@@ -201,7 +210,8 @@ function renderStatus() {
     + (fresh ? `<span class="stat fresh"><b>${fresh}</b>new</span>` : '')
     + stat(ready, 'ready', 'ready')
     + stat(items.length - ready - staged, 'to review')
-    + (staged ? stat(staged, 'staged', 'staged') : '');
+    + (staged ? stat(staged, 'staged', 'staged') : '')
+    + ((state.downloads || []).length ? stat(state.downloads.length, 'downloads', 'downloads') : '');
   $('status').querySelectorAll('[data-goto]').forEach((b) => {
     b.onclick = () => {
       tab = b.dataset.goto;
@@ -271,8 +281,12 @@ async function followJob() {
         $('jobclose').hidden = false;
       } else if (job.ok) {
         setTimeout(() => { bar.hidden = true; }, 2500);
-        const note = { 'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.',
-          undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.' }[job.kind];
+        if (job.kind === 'art') artStamp = `?v=${Date.now().toString(36)}`;
+        const note = { 'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', art: 'Artwork written. Undo is in the bin.',
+          undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.',
+          download_import: 'Imported. The album is in Arriving until Sift checks it.', download_import_anyway: 'Imported. The album is in Arriving until Sift checks it.',
+          download_add: 'Added to Lidarr, unmonitored, and the folder checked against it again.', download_release: 'Release changed, and the folder checked again.',
+          download_bin: 'The download is in the bin.' }[job.kind];
         if (note) toast(note);
       } else if (inline) {
         toast('The check failed. History has the error.');
@@ -327,6 +341,19 @@ const matches = (i) => !search || fold(`${i.artist} ${i.title}`).includes(fold(s
 
 function row(i) {
   const badges = [];
+  if (i.download) {
+    // a download: no cover-side badges, no picking; the row opens the download's own page
+    if (i.kind === 'flac' || i.kind === 'mp3') badges.push(`<span class="badge ${i.kind}">${i.kind.toUpperCase()} ${esc(i.fmt)} · ${i.n}</span>`);
+    else badges.push(`<span class="badge warn">${i.kind === 'mixed' ? 'FLAC and MP3 mixed' : 'no audio'}</span>`);
+    if (i.busy) badges.push('<span class="badge warn">downloading</span>');
+    if (i.damaged) badges.push(`<span class="badge bad">${i.damaged} damaged</span>`);
+    if (i.allowed.includes('import')) badges.push('<span class="badge decision">ready to import</span>');
+    if (i.source) badges.push(`<span class="badge">from ${esc(i.source.user)}</span>`);
+    return `<a class="row" href="#/download/${i.id}">${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
+      <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
+      <span class="rreason">${esc((i.reasons || [])[0] || '')}</span>
+      <span class="badges">${badges.join('')}</span></span></a>`;
+  }
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
   if (sortBy === 'arrived' && i.flac && i.flac.imported) badges.push(`<span class="badge" title="When the FLAC arrived">got ${day(i.flac.imported)}</span>`);
@@ -370,7 +397,7 @@ function renderList() {
     $('selecting').onclick = () => { selecting = !selecting; selected.clear(); renderList(); };
   }
   $('selecting').innerHTML = selecting ? `${ic('x')}Cancel` : `${ic('select')}Select`;
-  const byQueue = (key) => state.items.filter((i) => queueOf(i) === key && matches(i)).sort(SORTS[sortBy][1]);
+  const byQueue = (key) => allItems().filter((i) => queueOf(i) === key && matches(i)).sort(SORTS[sortBy][1]);
   const shown = [];
   for (const [key, name, blurb] of QUEUES) {
     const items = byQueue(key);
@@ -388,7 +415,7 @@ function renderList() {
     // Stage all is for the albums an MP3 confirms; one with no MP3 to replace is decided on its own
     const confirmed = items.filter((i) => !i.no_mp3);
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
-      + (selecting && items.length && key !== 'staged' ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
+      + (selecting && items.length && key !== 'staged' && key !== 'downloads' ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
       + (!selecting && !search && key === 'ready' && confirmed.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${confirmed.length}</button>` : '')
       + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
@@ -413,7 +440,7 @@ function renderList() {
     c.onchange = () => { const id = Number(c.dataset.pick); if (c.checked) selected.add(id); else selected.delete(id); renderSelection(); };
   });
   view.querySelectorAll('[data-all]').forEach((b) => {
-    b.onclick = () => { byQueue(b.dataset.all).forEach((i) => selected.add(i.id)); renderList(); };
+    b.onclick = () => { byQueue(b.dataset.all).forEach((i) => { if (!i.download) selected.add(i.id); }); renderList(); };
   });
   const approve = $('approve');
   if (approve) {
@@ -532,6 +559,35 @@ function neighbours(a) {
   return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null, at: k, of: list.length };
 }
 let afterJob = null;          // where to go once the decision in progress succeeds
+let artStamp = '';            // changes when artwork is written, so cover pictures reload
+
+// Artwork Simon drops on an album or download page: confirm, then post the picture's bytes.
+// The page-wide drop target is set up once; which id it goes to is whatever page is open.
+let artTarget = null;         // { id, files, label } for the page on screen, or null
+async function offerArt(file) {
+  if (!artTarget || !file) return;
+  if (!/^image\/(jpeg|png)$/.test(file.type)) { toast('A JPEG or PNG, please.'); return; }
+  const { id, files, label } = artTarget;
+  if (!await ask({ title: 'Write this picture into the files?', ok: 'Write artwork',
+    body: `${file.name} (${gb(file.size)}) becomes the embedded picture in ${files} file${files === 1 ? '' : 's'} of ${label}, and a cover.jpg beside them. `
+      + 'Whatever was there before goes in the bin, so this can be undone.' })) return;
+  releaseAudio();
+  try {
+    const r = await fetch(`/api/art/${id}`, { method: 'POST', headers: { 'Content-Type': file.type, 'X-CSRF': csrf || '' }, body: file });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `failed (${r.status})`);
+    watchJob();
+  } catch (e) { toast(e.message); }
+}
+$('artfile').onchange = () => { offerArt($('artfile').files[0]); $('artfile').value = ''; };
+document.addEventListener('dragover', (ev) => { if (artTarget) { ev.preventDefault(); document.body.classList.add('dropping'); } });
+document.addEventListener('dragleave', (ev) => { if (!ev.relatedTarget) document.body.classList.remove('dropping'); });
+document.addEventListener('drop', (ev) => {
+  document.body.classList.remove('dropping');
+  if (!artTarget) return;
+  ev.preventDefault();
+  offerArt(ev.dataTransfer.files[0]);
+});
 
 function buildRows(a) {
   const flac = a.flac ? a.flac.tracks : [];
@@ -613,6 +669,7 @@ function toolbar(a) {
   if (a.flac && a.flac.tracks.length) b.push(`<button id="tspectra">${ic('wave')}Spectrograms</button>`);
   if (hasBoth) b.push(`<button id="tpair" class="${a.diagnosis && a.diagnosis.suggest === 'pair' ? 'primary' : ''}">${ic('link')}Pair tracks by hand</button>`);
   if (a.flac && a.flac.tracks.length && a.reorder) b.push(`<button id="torder">${ic('list')}Edit FLAC tracks</button>`);
+  if (a.flac && a.flac.tracks.length) b.push(`<button id="tart">${ic('image')}${a.cover ? 'Replace artwork' : 'Set artwork'}</button>`);
   if (a.foreign || a.one_album) {
     b.push(`<button id="tone">${ic('folder')}${a.one_album ? 'Undo "folder is all one album"' : 'This folder is all one album'}</button>`);
   }
@@ -765,7 +822,7 @@ async function renderAlbum(id, keepMode = false) {
 
   view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a>${pager}</div>
     <div class="ahead">
-      ${a.cover ? `<img class="cover" src="/api/cover/${a.id}" alt="">` : '<span class="cover none"></span>'}
+      ${a.cover ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">` : '<span class="cover none"></span>'}
       <div><p class="qname">${esc(qname)}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
       <p class="totals">${esc(totals)}</p></div>
     </div>
@@ -859,6 +916,9 @@ async function renderAlbum(id, keepMode = false) {
       tool0('/api/block', { id: a.id }, `${a.source.user} is blocked.`);
     }
   });
+  artTarget = a.flac && a.flac.tracks.length && !a.flac.tracks.some((t) => t.damaged)
+    ? { id: a.id, files: a.flac.tracks.length, label: `${a.artist} — ${a.title}` } : null;
+  on('tart', () => $('artfile').click());
   on('tspectra', () => { mode = 'spectra'; renderAlbum(a.id, true); });
   on('tpair', () => { mode = 'pair'; picked = null; renderAlbum(a.id, true); });
   on('tdone', () => { mode = 'view'; picked = null; renderAlbum(a.id, true); });
@@ -926,6 +986,114 @@ async function renderAlbum(id, keepMode = false) {
       };
     });
   }
+}
+
+// ---- a hand-made download ------------------------------------------------------
+// One folder from slskd's downloads. The right Lidarr says how it would file each track;
+// Import hands it the whole folder in one go. Playing and spectrograms work as on an album.
+
+async function renderDownload(id) {
+  let a;
+  try { a = await api(`/api/download/${id}`); } catch {
+    if (location.hash !== `#/download/${id}`) return;
+    view.innerHTML = '<p class="empty">This download is no longer listed. <a href="#/">Back to the list</a></p>';
+    return;
+  }
+  if (location.hash !== `#/download/${id}`) return;
+  if (!album || album.id !== `d${a.id}`) mode = 'view';
+  album = { id: `d${a.id}`, download: true, flac: { tracks: a.tracks }, mp3: null, paths: { flac: a.paths },
+    rows: a.tracks.map((_, k) => ({ m: null, f: k })) };
+  document.title = `${a.title} · Sift`;
+  const who = a.inst === 'mp3' ? 'the MP3 Lidarr' : 'Lidarr-FLAC';
+  const lib = a.inst === 'mp3' ? 'the MP3 library' : "Lidarr-FLAC's library";
+  const v = a.lidarr && !a.lidarr.error ? a.lidarr : null;
+  const filed = v && v.album_id;
+  const n = a.tracks.length;
+  const files = `${n} file${n === 1 ? '' : 's'}`;
+  const relText = (r) => [r.date && r.date.slice(0, 4), r.title, r.format, r.country, r.label, `${r.tracks} tracks`].filter(Boolean).join(' · ');
+  const totals = [`${a.kind === 'mp3' ? 'MP3' : a.kind === 'flac' ? 'FLAC' : 'Files'} ${clock(a.seconds)} · ${files} · ${gb(a.bytes)}`, a.date].filter(Boolean).join(' · ');
+  const note = a.busy ? 'Still downloading. Sift looks again once slskd has finished with it.'
+    : a.blocked ? a.blocked
+    : `Every file has a track in the release. Import moves and renames them into ${lib}.`;
+  const texts = {
+    import: ['Import', `${who} moves and renames the ${files} into ${lib} as ${filed ? `${v.artist} — ${v.title}` : 'the album'}. `
+      + 'The album then goes through the review queue like any Soularr download, and the emptied folder goes in the bin.'],
+    import_anyway: ['Import anyway', `${a.blocked}. Importing anyway is how albums were broken before: only do it when you know the folder is what you want. Enter the password to confirm.`],
+    add: ['Add to Lidarr', a.add ? `${a.add.artist} — ${a.add.title}${a.add.year ? ` (${a.add.year})` : ''} is added to ${who} unmonitored, so nothing goes looking for it, and the folder is checked against it again.` : ''],
+    release: ['Change release', 'Which release of the album these files are. Pick the one whose track count matches the folder.'],
+    bin: ['Delete download', 'The folder goes in the bin. Nothing is deleted until you empty the bin, and Undo is there until then.'],
+  };
+  const icon = { import: 'inbox', import_anyway: 'inbox', add: 'plus', release: 'list', bin: 'trash' };
+  const buttons = ['import', 'add', 'release', 'import_anyway', 'bin'].filter((d) => a.allowed.includes(d))
+    .map((d) => `<button class="${d === 'import' ? 'primary' : d === 'import_anyway' ? 'danger' : d === 'bin' ? 'ghost' : ''}" data-act="${d}">${ic(icon[d])}${texts[d][0]}</button>`);
+  const tools = mode === 'spectra'
+    ? `<div class="tools"><span class="hint">Each track's spectrum. A FLAC made from an MP3 goes dark well below the top.</span><button id="tcancel" class="primary">${ic('check')}Done</button></div>`
+    : n ? `<div class="tools"><button id="tspectra">${ic('wave')}Spectrograms</button>${!a.busy && !a.damaged
+      ? `<button id="tart">${ic('image')}${a.cover ? 'Replace artwork' : 'Set artwork'}</button>` : ''}</div>` : '';
+  const filecell = (k) => {
+    const f = v && v.files[k];
+    if (!f) return '<div class="cell empty">—</div>';
+    return `<div class="cell"><span class="ttext"><span class="ttitle">${f.mapped ? esc(f.tracks) : '<span class="badge warn">no track</span>'}</span>
+      ${f.why.length ? `<span class="tmeta">${esc(f.why.join('; '))}</span>` : ''}</span></div>`;
+  };
+  const table = n ? `<div class="tracks"><div class="thead"><div>${a.kind === 'mp3' ? 'MP3' : 'FLAC'}</div><div></div><div>${esc(who)}</div></div>
+    ${a.tracks.map((t, k) => `<div class="trow">${cell(album, 'flac', k, k)}
+      <div class="match ${v && v.files[k] ? (v.files[k].mapped ? 'same' : 'diff') : ''}">${v && v.files[k] ? (v.files[k].mapped ? '✓' : '≠') : ''}</div>${filecell(k)}</div>${mode === 'spectra'
+      ? `<div class="spec">${spectrumPic(album, 'flac', k)}<div></div><div class="specpic none"></div></div>` : ''}`).join('')}</div>` : '';
+  view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a></div>
+    <div class="ahead">
+      ${a.cover ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">` : '<span class="cover none"></span>'}
+      <div><p class="qname">Download</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist || a.name)}</p>
+      <p class="totals">${esc(totals)}</p></div>
+    </div>
+    <p class="diag">${esc(note)}</p>
+    <ul class="reasons"><li>Folder: ${esc(a.name)}</li>
+      ${filed ? `<li>${esc(who)} files it as ${esc(v.artist)} — ${esc(v.title)}${v.release ? `, release ${esc(relText({ ...v.release, country: '', label: '' }))}` : ''}</li>` : ''}
+      ${a.add && !filed ? `<li>MusicBrainz has ${esc(a.add.artist)} — ${esc(a.add.title)}${a.add.year ? ` (${esc(a.add.year)})` : ''}${a.add.type ? `, ${esc(a.add.type.toLowerCase())}` : ''}, ${a.add.by_id ? "the release the files' tags name" : 'found by name, so check it is the right one'}</li>` : ''}
+      ${a.lidarr && a.lidarr.error ? `<li>${esc(a.lidarr.error)}</li>` : ''}</ul>
+    ${a.source ? `<p class="source">From Soulseek user <b>${esc(a.source.user)}</b>${a.source.when ? ` · finished ${esc(day(a.source.when, true))}` : ''}</p>` : ''}
+    <div class="decisions">${mode === 'view' ? buttons.join('') : ''}</div>
+    ${tools}${table}`;
+
+  const go = async (body, after) => {
+    releaseAudio();
+    try { await api('/api/download', { id: a.id, ...body }); afterJob = after || null; watchJob(); } catch (e) { afterJob = null; toast(e.message); }
+  };
+  view.querySelectorAll('[data-act]').forEach((b) => {
+    b.onclick = async () => {
+      const d = b.dataset.act;
+      const [title, body] = texts[d];
+      if (d === 'release') {
+        const chosen = Math.max(0, a.releases.findIndex((r) => r.selected));
+        const answer = await ask({ title: `${title}?`, body, ok: title, choices: a.releases.map(relText), chosen });
+        if (answer) go({ action: 'release', release: answer.choice });
+        return;
+      }
+      if (d === 'import_anyway') {
+        let error = '';
+        for (;;) {
+          const pw = await ask({ title: `${title}?`, body, ok: title, danger: true, password: true, error });
+          if (pw == null) return;
+          try { await api('/api/download', { id: a.id, action: d, password: pw }); afterJob = '#/'; watchJob(); return; } catch (e) {
+            if (e.status !== 401) { toast(e.message); return; }
+            if (e.message === 'not signed in') { location.href = '/'; return; }
+            error = 'Wrong password';
+          }
+        }
+      }
+      if (await ask({ title: `${title}?`, body, ok: title, danger: d === 'bin' })) {
+        if (d === 'import') { tab = 'arriving'; localStorage.setItem('sift-tab', tab); }
+        go({ action: d }, d === 'import' || d === 'bin' ? '#/' : null);
+      }
+    };
+  });
+  view.querySelectorAll('.play').forEach((b) => {
+    b.onclick = (ev) => { ev.stopPropagation(); play('flac', Number(b.dataset.idx), Number(b.dataset.row)); };
+  });
+  artTarget = n && !a.busy && !a.damaged ? { id: a.id, files: n, label: `${a.artist || a.name} — ${a.title}` } : null;
+  if ($('tart')) $('tart').onclick = () => $('artfile').click();
+  if ($('tspectra')) $('tspectra').onclick = () => { mode = 'spectra'; renderDownload(a.id); };
+  if ($('tcancel')) $('tcancel').onclick = () => { mode = 'view'; renderDownload(a.id); };
 }
 
 // ---- player ------------------------------------------------------------------
@@ -1118,7 +1286,7 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 
 const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC', bin_album: 'Album put in the bin',
   check: 'Check for new arrivals', adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked',
-  strip_id3: 'ID3v1 tags cut off' };
+  strip_id3: 'ID3v1 tags cut off', art: 'Artwork written into the files', bin_download: 'Download put in the bin', import_download: 'Download imported by Lidarr (the folder left behind)' };
 
 function renderBin() {
   document.title = 'Bin · Sift';
@@ -1176,7 +1344,8 @@ function renderBin() {
 const OUTCOME = { bin: ['In the bin', ''], undone: ['Undone', 'muted'], emptied: ['Deleted for good', ''], failed: ['Failed', 'bad'] };
 const DECIDED_MANY = { 'apply-staged': 'Approve staged', check: 'Check', undo: 'Undo', 'empty-bin': 'Empty bin',
   pair: 'Pair tracks', unpair: 'Forget a pair', one_album: 'One album', watch_on: 'Watch for a better FLAC',
-  watch_off: 'Stop watching', dismiss: 'Looks fine' };
+  watch_off: 'Stop watching', dismiss: 'Looks fine', downloads: 'List downloads', download_import: 'Import download',
+  download_import_anyway: 'Import download anyway', download_add: 'Add to Lidarr', download_release: 'Change release', download_bin: 'Bin download' };
 
 async function renderHistory() {
   document.title = 'History · Sift';
@@ -1243,8 +1412,10 @@ document.addEventListener('keydown', (ev) => {
     ev.preventDefault();
     keyRows(ev.key === 'ArrowDown' ? 1 : -1);
   } else if (ev.key === 'Escape' && !$('menupop').hidden) { menu(false); $('more').focus();
-  } else if (ev.key === 'Escape' && onAlbum && mode !== 'view') { mode = 'view'; picked = null; renderAlbum(album.id, true); }
-  else if ((ev.key === 'j' || ev.key === 'k') && onAlbum) {
+  } else if (ev.key === 'Escape' && onAlbum && mode !== 'view') {
+    mode = 'view'; picked = null;
+    if (album.download) renderDownload(Number(String(album.id).slice(1))); else renderAlbum(album.id, true);
+  } else if ((ev.key === 'j' || ev.key === 'k') && onAlbum && !album.download) {
     const n = neighbours(album)[ev.key === 'k' ? 'next' : 'prev'];
     if (n) location.hash = `#/album/${n.id}`;
   } else if (['1', '2', '3'].includes(ev.key) && onAlbum && mode === 'view') {
@@ -1261,13 +1432,14 @@ function route() {
   let m;
   renderSelection();
   if ((m = /^#\/album\/(\d+)$/.exec(h))) return renderAlbum(Number(m[1]), true);
+  if ((m = /^#\/download\/(\d+)$/.exec(h))) return renderDownload(Number(m[1]));
   album = null;
   if (h === '#/bin') return renderBin();
   if (h === '#/history') return renderHistory();
   return renderList();
 }
 
-window.addEventListener('hashchange', () => { window.scrollTo(0, 0); mode = 'view'; album = null; route(); });
+window.addEventListener('hashchange', () => { window.scrollTo(0, 0); mode = 'view'; album = null; artTarget = null; route(); });
 $('check').onclick = () => run('/api/check', {});
 // History and Sign out live behind the ⋯ menu; anything outside it, or Esc, closes it
 const menu = (open) => {

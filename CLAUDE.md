@@ -9,7 +9,9 @@ rules to keep and the lessons from the first build, are in `~/notes/sift-feature
   The one exception: Library duplicates show each file's path relative to its music folder
   (`FLAC/Artist/Album/01.flac`), never an absolute path.
 - Every file change goes through `bin/sift.py` and is recorded in `bin.json` for Undo.
-  Emptying the bin is the only delete.
+  Emptying the bin is the only delete. The one exception is importing a hand-made Soulseek
+  download, where Lidarr moves the files (`ManualImport`, whole folder, one batch, per
+  `~/notes/flac-upgrade-runbook.md`); it is still recorded in `bin.json`, but not undoable.
 - Classification lives in `~/claude-roon/flac_migrate.py` (outside this repo). Bump
   `MATCH_VERSION` there whenever fingerprint matching changes.
 - `SUSPECT_HZ` in `bin/sift.py` was calibrated on the queue on 16 Sep 2026. Recalibrate on

@@ -71,6 +71,15 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
+fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: new Date().toISOString(), items: [{
+  id: 700000001, name: 'Found It Folder', artist: 'Someone', title: 'Found It', kind: 'flac', inst: 'flac', busy: false, cover: false,
+  blocked: "Lidarr-FLAC doesn't know this album: add it first", allowed: ['add', 'bin'], force_ok: false, damaged: 0, date: '2020',
+  tracks: [{ ...t('A', 60), cutoff: 22050, lufs: -12 }], seconds: 60, bytes: 1e6, first_seen: '2026-09-29T14:00:00',
+  source: { user: 'seeder', when: '2026-09-29T13:00:00' }, add: { artist: 'Someone', title: 'Found It', mbid: 'mb-1', year: '2020', by_id: true, type: 'EP' }, releases: [],
+  lidarr: { error: null, artist: null, title: null, album_id: null, artist_id: null, albums: 0, unmapped: 1, rejections: ["Couldn't find similar album"],
+    release: null, files: [{ mapped: false, tracks: '', why: ["Couldn't find similar album"] }] },
+  _dir: MEDIA, _files: [path.join(MEDIA, 'a.flac')],
+}] }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
   { id: 'e0', at: '2026-01-01T00:00:00Z', decision: 'keep_flac', label: 'Old — One', bytes: 2e9, ops: [] },
   { id: 'e1', at: new Date().toISOString(), decision: 'reorder', label: 'Band — Record', bytes: 0, ops: [] }] }));
@@ -113,7 +122,7 @@ try {
   check(await page.locator('#q-ready a.row').count() === 2
     && (await page.locator('#q-ready .badge.warn').textContent()) === 'No MP3 to replace',
     'a ready album with no MP3 to replace says so, and Stage all counts only the other one');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 2|Suspect FLAC 1|Different or unconfirmed 2|Health 1', 'queue tabs with counts');
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 2|Suspect FLAC 1|Different or unconfirmed 2|Health 1|Downloads 1', 'queue tabs with counts');
   check(await page.locator('section.queue').count() === 1 && await page.locator('#q-ready').count() === 1, 'only the Ready tab shows at first');
   await page.click('[data-tab="suspect"]');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a tab shows its queue; a suspect album shows where its FLAC stops');
@@ -145,7 +154,7 @@ try {
   await page.waitForSelector('[data-tab="staged"]');
   check(!calls().some((c) => /resolve|apply-staged/.test(c)), 'a decision on the selection is staged, and nothing runs');
   check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 1|Different or unconfirmed 2|Health 1',
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 1|Different or unconfirmed 2|Health 1|Downloads 1',
     'the staged albums leave their queues for a Staged tab');
 
   console.log('staged');
@@ -557,6 +566,42 @@ try {
   check(await page.evaluate(() => window.pwned === undefined && !document.querySelector('img[src="x"]'))
     && (await page.content()).includes('&lt;img src=x'), 'is shown as text, never run');
   fs.writeFileSync(queueFile2, clean);
+
+  console.log('downloads');
+  await page.goto(BASE + '/app');
+  await page.waitForSelector('.queue');
+  await page.click('[data-tab="downloads"]');
+  check((await page.locator('#q-downloads a.row .rtitle').textContent()) === 'Someone — Found It'
+    && (await page.locator('#q-downloads a.row .rreason').textContent()) === "Lidarr-FLAC doesn't know this album: add it first"
+    && (await page.locator('#q-downloads .badge', { hasText: 'from seeder' }).count()) === 1, 'the Downloads tab lists a download with why it waits and who it came from');
+  await page.click('#q-downloads a.row');
+  await page.waitForSelector('[data-act="add"]');
+  check((await page.locator('.decisions button').allTextContents()).join('|') === 'Add to Lidarr|Delete download', 'a download Lidarr does not know offers Add and Delete');
+  check((await page.locator('.trow').count()) === 1 && (await page.locator('.trow .badge.warn').textContent()) === 'no track'
+    && (await page.locator('.reasons li', { hasText: 'MusicBrainz has Someone — Found It (2020), ep' }).count()) === 1, 'each file shows how Lidarr would file it, and what Add would add');
+  await page.click('.trow .play');
+  await page.waitForSelector('#player:not([hidden])');
+  check((await page.locator('#pside').textContent()) === 'FLAC' && await page.locator('#ab').isDisabled(), "a download's track plays, with no other version to A/B");
+  await page.click('#pclose');
+  await page.click('[data-act="add"]');
+  check((await page.locator('#dbody').textContent()).startsWith('Someone — Found It (2020) is added to Lidarr-FLAC unmonitored'), 'Add says what it adds');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('download 700000001 add')), 'Add is sent');
+  await page.click('[data-act="bin"]');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => c.endsWith('download 700000001 bin')) && (location => true)(), 'Delete download is sent');
+
+  console.log('artwork');
+  await page.goto(BASE + '/app#/album/2');
+  await page.waitForSelector('#tart');
+  check((await page.locator('#tart').textContent()) === 'Set artwork', 'an album without a cover offers Set artwork');
+  await page.setInputFiles('#artfile', { name: 'front.png', mimeType: 'image/png', buffer: Buffer.alloc(2048, 3) });
+  check((await page.locator('#dbody').textContent()).startsWith('front.png (0 MB) becomes the embedded picture in 1 file of Other — Fine'), 'dropping a picture asks first, naming the album and its files');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => / art 2 .*\.png$/.test(c)), 'and the picture is sent for the album on screen');
 
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {

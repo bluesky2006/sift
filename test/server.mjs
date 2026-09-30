@@ -48,6 +48,16 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     _do: { kind: 'dupe' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/secret/elsewhere/b.flac'], mp3: [path.join(MUSIC, 'Art/Alb/a.mp3')] },
   }],
 }));
+fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: new Date().toISOString(), items: [{
+  id: 700000001, name: 'Fresh', artist: 'Someone', title: 'Found It', kind: 'flac', inst: 'flac', busy: false, cover: false,
+  blocked: 'Lidarr-FLAC advises against it: Has missing tracks', allowed: ['import_anyway', 'release', 'bin'], force_ok: true, damaged: 0,
+  tracks: [{ name: '01.flac', secs: 3, fmt: '16-bit / 44.1 kHz' }, { name: 'x' }], seconds: 3, bytes: 10000, first_seen: '2026-09-29T14:00:00',
+  source: { user: 'seeder', when: '2026-09-29T13:00:00' }, add: null, releases: [{ release: 'r-a', title: 'A', tracks: 1, selected: true }, { release: 'r-b', title: 'B', tracks: 2, selected: false }],
+  lidarr: { error: null, artist: 'Someone', title: 'Found It', album_id: 9, artist_id: 3, albums: 1, unmapped: 0, rejections: ['Has missing tracks'],
+    release: { title: 'A', tracks: 1 }, files: [{ mapped: true, tracks: '1 T', why: ['Has missing tracks'] }, { mapped: true, tracks: '2 T', why: [] }],
+    _rows: [{ path: '/secret/container/01.flac' }] },
+  _dir: path.join(MUSIC, 'Art/Alb'), _files: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd'],
+}] }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
   { id: 'b1', at: '2026-09-10T10:00:00', decision: 'keep_flac', album_id: 5, label: 'In — Bin', bytes: 100, ops: [{ op: 'move', from: '/secret/from', to: '/secret/to' }] }] }));
 fs.writeFileSync(path.join(STATE, 'history.json'), JSON.stringify({
@@ -280,6 +290,50 @@ try {
   console.log('engine output');
   const jobText = JSON.stringify(await (await req('/api/job')).json()) + JSON.stringify(await (await req('/api/history')).json());
   check(jobText.includes("can't") && !jobText.includes('/secret'), 'paths in job output and history are hidden, quoted or not');
+
+  console.log('downloads');
+  await new Promise((res) => setTimeout(res, 1500));                   // any earlier job done
+  const stdl = await (await req('/api/state')).json();
+  check(stdl.downloads.length === 1 && stdl.downloads[0].id === 700000001 && stdl.downloads[0].n === 2 && stdl.downloads[0].source.user === 'seeder'
+    && !JSON.stringify(stdl.downloads).includes('/secret') && !JSON.stringify(stdl.downloads).includes(MUSIC) && !JSON.stringify(stdl.downloads).includes('_dir'),
+    'state lists each download without paths');
+  const dl = await (await req('/api/download/700000001')).json();
+  check(!JSON.stringify(dl).includes('/secret') && !JSON.stringify(dl).includes(MUSIC) && dl.paths[0] === 'Alb/01.flac' && dl.paths[1] === null,
+    `a download shows each file inside its folder, and nothing for one outside it (${JSON.stringify(dl.paths)})`);
+  check((await req('/api/download/700000002')).status === 404, 'a download not listed is 404');
+  check((await req('/api/audio/d700000001/flac/0')).status === 200, "a download's track plays from the downloads folder");
+  check((await req('/api/audio/d700000001/flac/1')).status === 404 && (await req('/api/audio/d700000001/mp3/0')).status === 404
+    && (await req('/api/audio/d700000001/flac/5')).status === 404, 'never a file outside the music folders, an MP3 side, or an index past the end');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'bin' } })).status === 403, 'no CSRF token, refused');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'rm' }, csrf })).status === 400, 'unknown action refused');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'import' }, csrf })).status === 400, 'an action the download does not allow refused');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'release', release: 2 }, csrf })).status === 400
+    && (await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'release', release: 'r-b' }, csrf })).status === 400, 'a release past the list, or by name, refused');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'import_anyway', password: 'wrong-password-here' }, csrf })).status === 401,
+    'Import anyway wants the password');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'release', release: 1 }, csrf })).status === 202, 'a release by index runs');
+  await new Promise((res) => setTimeout(res, 1500));
+  check(lastCall().endsWith('download 700000001 release 1'), 'as download ID release N');
+  check((await req('/api/download', { method: 'POST', body: { id: 700000001, action: 'import_anyway', password: 'a-long-test-password' }, csrf })).status === 202,
+    'Import anyway runs with the password');
+  await new Promise((res) => setTimeout(res, 1500));
+  check(lastCall().endsWith('download 700000001 import-anyway'), 'as download ID import-anyway');
+
+  console.log('artwork');
+  await new Promise((res) => setTimeout(res, 1500));
+  const art = (id, type, body, token = csrf) => fetch(`http://127.0.0.1:${PORT}/api/art/${id}`, { method: 'POST',
+    headers: { Cookie: jar, 'Content-Type': type, ...(token ? { 'X-CSRF': token } : {}) }, body });
+  check((await art(1, 'image/png', Buffer.alloc(100, 1), null)).status === 403, 'no CSRF token, refused');
+  check((await art(1, 'text/plain', Buffer.alloc(100, 1))).status === 415, 'only a JPEG or PNG');
+  check((await art(3, 'image/png', Buffer.alloc(100, 1))).status === 404, 'nothing to write it into, refused');
+  check((await art(1, 'image/png', Buffer.alloc(13 * 1024 * 1024, 1))).status === 400, 'too big, refused');
+  check((await art(1, 'image/png', Buffer.alloc(100, 1))).status === 202, 'a picture for an album starts the job');
+  await new Promise((res) => setTimeout(res, 1500));
+  const artCall = lastCall();
+  check(/ art 1 .*\/uploads\/1-[a-z0-9]+\.png$/.test(artCall) && fs.existsSync(artCall.split(' ').pop()),
+    `as art ID FILE, with the picture saved under the state folder (${artCall})`);
+  check((await art(700000001, 'image/jpeg', Buffer.alloc(100, 1))).status === 202, 'and for a download');
+  await new Promise((res) => setTimeout(res, 1500));
 
   console.log('sign out');
   const old = jar;

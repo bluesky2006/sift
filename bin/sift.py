@@ -12,6 +12,10 @@
     sift.py health MINUTES             check the FLAC library for damaged or converted files, for so long
     sift.py strip-id3 [FOLDER...]      cut ID3v1 tags off the end of intact library FLACs (undo in the bin)
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
+    sift.py downloads                  list slskd's hand-made downloads, write downloads.json
+    sift.py download ID ACTION         import | import-anyway | add | bin | release N, for a listed download
+    sift.py fetch-cover INST ALBUM     shell only: put a cover.jpg beside an imported album that has none
+    sift.py art ID FILE                write a picture the app saved under state/uploads into the album's files
 
     sift.py pair ID M F                MP3 track M is FLAC track F (indexes into the album)
     sift.py unpair ID M                forget a hand-made pair
@@ -29,13 +33,13 @@ FLAC track by fingerprint, and most FLAC tracks reach above SUSPECT_HZ (a FLAC t
 lower is usually a converted MP3, and waits in Suspect FLAC instead).
 """
 import base64, collections, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
-    urllib.request, uuid, zlib
+    urllib.parse, urllib.request, uuid, zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.expanduser("~/claude-roon"))
 import flac_migrate as fm
-import mutagen
+import mutagen, mutagen.flac, mutagen.id3
 
 STATE = os.environ.get("SIFT_STATE", os.path.expanduser("~/.local/state/sift"))
 CONF = {
@@ -43,7 +47,14 @@ CONF = {
     "mp3_root": fm.MP3_ROOT,                       # both of these on /mnt/roon-music
     "flac_dest": fm.FLAC_DEST,
     "bins": {"/mnt/roon-music": "/mnt/roon-music/Sift-bin",
-             "/mnt/roon-data": "/mnt/roon-data/Sift-bin"},
+             "/mnt/roon-data": "/mnt/roon-data/Sift-bin",
+             "/DATA/AppData/slskd": "/DATA/AppData/slskd/Sift-bin"},
+    "plain_bins": ["/DATA/AppData/slskd"],        # on the root disk, so no mount to check
+    # slskd's downloads folder, and the same folder as each Lidarr container sees it (None
+    # when that Lidarr has no mount for it). _keep is Simon's own and is never listed.
+    "downloads_dir": "/DATA/AppData/slskd/downloads",
+    "downloads_in": {"flac": "/data/slskd_downloads", "mp3": None},
+    "downloads_skip": ["_keep"],
     "migrated": fm.MIGRATED,
     "returned": fm.RETURNED,
     "damaged": os.path.join(fm.HERE, "flac-damaged.json"),
@@ -133,10 +144,14 @@ def lidarr(inst, path, method="GET", body=None):
     if os.environ.get("SIFT_FAKE_API"):            # tests: record the call, pretend it worked
         with open(os.environ["SIFT_FAKE_API"], "a") as f:
             f.write(json.dumps([inst, method, path, body]) + "\n")
+        if method == "GET" and path.startswith(("/manualimport", "/album/lookup", "/rootfolder", "/command/")):
+            # the test writes what Lidarr would say, keyed by the start of the path
+            fake = json.load(open(os.environ["SIFT_FAKE_LIDARR"])) if os.environ.get("SIFT_FAKE_LIDARR") else {}
+            return next((v for k, v in fake.items() if path.startswith(k)), [] if path.startswith(("/manualimport", "/album/lookup", "/rootfolder")) else {"status": "completed"})
         if method == "GET":
             return {"monitored": True, "anyReleaseOk": True, "releases": [{"foreignReleaseId": "rel-a", "monitored": True},
                                                     {"foreignReleaseId": "rel-b", "monitored": False}]}
-        return {}
+        return {"id": 1}
     req = urllib.request.Request(
         CONF[f"{inst}_api"] + path, method=method,
         headers={"X-Api-Key": api_key(inst), "Content-Type": "application/json"},
@@ -347,11 +362,11 @@ def releases(inst):
     return out
 
 
-def release_options(album_id):
+def release_options(album_id, inst="flac"):
     """Lidarr-FLAC's releases for an album, for choosing which one Soularr looks for. The
     browser picks by index into this list; the engine finds the release again by MBID."""
     try:
-        db = sqlite3.connect(CONF["flac_db"], uri=True)
+        db = sqlite3.connect(CONF[f"{inst}_db"], uri=True)
         rows = db.execute("""select ForeignReleaseId, Title, Disambiguation, ReleaseDate, Country, Label,
                                     Media, TrackCount, Monitored
                              from AlbumReleases where AlbumId = ? order by ReleaseDate, Id""", (album_id,)).fetchall()
@@ -1121,6 +1136,10 @@ def check():
         counts[i["queue"]] = counts.get(i["queue"], 0) + 1
     log(f"check: {counts} in {time.time() - t:.0f}s")
     try:
+        scan_downloads()
+    except Exception as e:
+        log(f"WARNING: downloads not listed ({e})")
+    try:
         notify(q["items"])
     except Exception as e:
         log(f"WARNING: jot not sent ({e})")
@@ -1212,7 +1231,7 @@ def mount_of(path):
 def require_mounted(m):
     """An unmounted drive leaves its mount point as a plain folder on the root disk:
     moving into it fills root, and the files hide once the drive comes back."""
-    if CONF.get("check_mounts", True) and not os.path.ismount(m):
+    if CONF.get("check_mounts", True) and m not in CONF.get("plain_bins", []) and not os.path.ismount(m):
         raise RuntimeError(f"refusing: the {os.path.basename(m)} drive is not mounted")
 
 
@@ -1376,14 +1395,14 @@ class Entry:
         save_record(path, data)
 
 
-def set_release(album_id, mbid, album=None, any_ok=False):
+def set_release(album_id, mbid, album=None, any_ok=False, inst="flac"):
     """Select `mbid` (None leaves the releases as they are) and set anyReleaseOk."""
-    album = album or lidarr("flac", f"/album/{album_id}")
+    album = album or lidarr(inst, f"/album/{album_id}")
     if mbid:
         for r in album.get("releases", []):
             r["monitored"] = r["foreignReleaseId"] == mbid
     album["anyReleaseOk"] = any_ok
-    lidarr("flac", f"/album/{album_id}", "PUT", album)
+    lidarr(inst, f"/album/{album_id}", "PUT", album)
 
 
 def undo_ops(ops, failed=None, progress=None):
@@ -1425,6 +1444,12 @@ def undo_ops(ops, failed=None, progress=None):
                 if not tag_is_back(o):                # cut off after the append last time
                     with open(o["file"], "ab") as f:
                         f.write(base64.b64decode(o["tag"]))
+            elif o["op"] == "embed":
+                for f in o["files"]:
+                    restore_art(f)
+            elif o["op"] == "wrote":
+                if os.path.isfile(o["file"]):      # a file Sift itself wrote, so removing it is the undo
+                    os.remove(o["file"])
             elif o["op"] == "ledger":
                 data = load_record(CONF[o["file"]], {})
                 if o["before"] is None:
@@ -1521,7 +1546,10 @@ def undo_problems(entry, entries):
     for o in entry["ops"]:
         if o.get("reversed"):
             continue                              # put back by an undo that stopped partway
-        if o["op"] == "move":
+        if o["op"] == "import":
+            problems.append("Lidarr imported these files; to take the album back out, decide Keep MP3 "
+                            "or Put in the bin on it in the queue")
+        elif o["op"] == "move":
             try:
                 require_mounted(mount_of(o["from"]))
                 require_mounted(mount_of(o["to"]))
@@ -1541,6 +1569,14 @@ def undo_problems(entry, entries):
                     problems.append(f"missing: {os.path.join(o['dir'], c['to'])}")
                 elif c["from"] not in tos and os.path.exists(os.path.join(o["dir"], c["from"])):
                     problems.append(f"already exists: {os.path.join(o['dir'], c['from'])}")
+        elif o["op"] == "embed":
+            for f in o["files"]:
+                if not os.path.isfile(f["file"]):
+                    problems.append(f"missing: {f['file']}")
+                for k in f["kept"]:
+                    kp = k if isinstance(k, str) else k["file"]
+                    if not os.path.isfile(kp):
+                        problems.append(f"missing: {kp}")
         elif o["op"] == "id3v1":
             if not os.path.isfile(o["file"]):
                 problems.append(f"missing: {o['file']}")
@@ -2198,6 +2234,566 @@ def adopt(path, label):
     log(f"adopted into bin: {path}")
 
 
+# ---- manual Soulseek downloads --------------------------------------------------
+# Folders downloaded by hand in slskd sit in its downloads folder: Soularr imports only
+# what it grabbed itself, and neither Lidarr watches the folder. Sift lists them, asks
+# the right Lidarr how it would file each one, and imports the whole folder in one
+# ManualImport command. Lidarr does the move and the renaming; the emptied folder goes
+# in the bin. The imported album then arrives in the queue like any Soularr download.
+
+DOWNLOADS = os.path.join(STATE, "downloads.json")
+DOWNLOAD_BASE = 700_000_000    # ids below the health and duplicate ranges, stable per folder name
+# Lidarr's own advice, which the app can override with Import anyway; any other rejection blocks
+ADVISORY = ("has missing tracks", "album release not requested")
+
+
+def download_id(name):
+    return DOWNLOAD_BASE + zlib.crc32(name.encode()) % 100_000_000
+
+
+def transfer_folders():
+    """Each download folder's Soulseek user and last finish, and which folders still have a
+    transfer going. slskd names the local folder after the remote one's last part."""
+    done, busy = {}, set()
+    try:
+        db = sqlite3.connect(CONF["transfers_db"], uri=True)
+        rows = db.execute("select Username, Filename, State, EndedAt from Transfers where Direction = 'Download'").fetchall()
+    except Exception:
+        return done, busy
+    for user, name, state, ended in rows:
+        parts = name.replace("\\", "/").split("/")
+        folder = parts[-2] if len(parts) > 1 else ""
+        if not state & 16:                        # not yet Completed
+            busy.add(folder)
+        elif state == 48 and (ended or "") >= done.get(folder, ("", ""))[1]:   # Completed | Succeeded
+            done[folder] = (user, ended or "")
+    return done, busy
+
+
+def download_tags(files):
+    tags = {}
+    try:
+        m = mutagen.File(files[0], easy=True)
+        for k, keys in (("artist", ("albumartist", "artist")), ("album", ("album",)),
+                        ("mbid", ("musicbrainz_albumid",)), ("date", ("date", "originaldate"))):
+            for key in keys:
+                if m and m.get(key):
+                    tags[k] = str(m[key][0])[:200]
+                    break
+    except Exception:
+        pass
+    return tags
+
+
+def lidarr_view(inst, name, folder, files):
+    """How this Lidarr would file the folder: GET /manualimport gives, per file, the artist,
+    album, release and tracks it matched, and any reason it would rather not."""
+    root = CONF["downloads_in"].get(inst)
+    inside = root.rstrip("/") + "/" + name
+    try:
+        rows = lidarr(inst, "/manualimport?folder=" + urllib.parse.quote(inside) + "&filterExistingFiles=false")
+    except Exception as e:
+        return {"error": f"couldn't ask Lidarr{'-FLAC' if inst == 'flac' else ''} about the folder ({str(e)[:120]})"}
+    by_path = {r.get("path"): r for r in rows if isinstance(r, dict)}
+    view = {"error": None, "files": [], "unmapped": 0, "rejections": [], "albums": 0,
+            "artist": None, "title": None, "album_id": None, "artist_id": None, "release": None, "_rows": []}
+    albums, reasons = {}, set()
+    for f in files:
+        r = by_path.get(inside + "/" + os.path.relpath(f, folder).replace(os.sep, "/"))
+        if not r:
+            view["files"].append({"mapped": False, "tracks": "", "why": ["Lidarr didn't list this file"]})
+            view["unmapped"] += 1
+            continue
+        alb, art = r.get("album") or {}, r.get("artist") or {}
+        tracks = r.get("tracks") or []
+        why = [x.get("reason", "") for x in r.get("rejections") or []]
+        reasons.update(why)
+        ok = bool(alb.get("id") and art.get("id") and tracks)
+        if not ok:
+            view["unmapped"] += 1
+        else:
+            albums.setdefault((art["id"], alb["id"]), (art.get("artistName", ""), alb.get("title", ""), r.get("albumReleaseId")))
+        view["files"].append({"mapped": ok, "why": why,
+                              "tracks": ", ".join(f"{t.get('trackNumber') or ''} {t.get('title') or ''}".strip() for t in tracks)})
+        view["_rows"].append(r)
+    view["albums"] = len(albums)
+    view["rejections"] = sorted(reasons)
+    if len(albums) == 1:
+        (art_id, alb_id), (artist, title, rel_id) = next(iter(albums.items()))
+        view.update(artist=artist, title=title, album_id=alb_id, artist_id=art_id)
+        rel = next((o for o in release_options(alb_id, inst) if o["selected"]), None)
+        view["release"] = rel and {"title": rel["title"], "tracks": rel["tracks"], "date": rel["date"], "format": rel["format"]}
+    return view
+
+
+def lookup_album(inst, tags, name):
+    """What Add to Lidarr would add: the album the files' MusicBrainz id names, else the
+    first match for their artist and album (or the folder's name)."""
+    mbid = tags.get("mbid", "")
+    term = f"lidarr:{mbid}" if re.fullmatch(r"[0-9a-f-]{36}", mbid) else " ".join(x for x in (tags.get("artist"), tags.get("album")) if x) or name
+    try:
+        hits = lidarr(inst, "/album/lookup?term=" + urllib.parse.quote(term))
+    except Exception:
+        return None
+    hits = [h for h in hits if isinstance(h, dict) and h.get("foreignAlbumId")] if isinstance(hits, list) else []
+    if not hits:
+        return None
+    h = hits[0]
+    return {"artist": (h.get("artist") or {}).get("artistName", ""), "title": h.get("title", ""),
+            "mbid": h["foreignAlbumId"], "year": (h.get("releaseDate") or "")[:4], "by_id": term.startswith("lidarr:"),
+            "type": h.get("albumType", "")}
+
+
+def import_block(item, force=False):
+    """Why Import is refused, or None. `force` waives only Lidarr's advisory rejections and
+    a release whose track count differs from the folder's, never a missing track or file."""
+    v = item.get("lidarr")
+    if item["busy"]:
+        return "Still downloading"
+    if item["kind"] == "mixed":
+        return "The folder holds both FLAC and MP3 files; sort it out by hand first"
+    if item["kind"] == "none":
+        return "No audio files in the folder"
+    if item.get("damaged"):
+        return f"{item['damaged']} FLAC file{'s' if item['damaged'] != 1 else ''} fail flac -t"
+    if not v:
+        return item.get("blocked") or "Lidarr can't see the folder"
+    if v.get("error"):
+        return v["error"]
+    who = "Lidarr-FLAC" if item["inst"] == "flac" else "the MP3 Lidarr"
+    if v["albums"] == 0:
+        return f"{who} doesn't know this album" + (": add it first" if item.get("add") else ", and MusicBrainz has nothing to add")
+    if v["albums"] > 1:
+        return f"{who} files these tracks under {v['albums']} different albums"
+    if v["unmapped"]:
+        return f"{v['unmapped']} file{'s have' if v['unmapped'] != 1 else ' has'} no track in the release"
+    hard = [r for r in v["rejections"] if not r.lower().startswith(ADVISORY)]
+    if hard:
+        return f"{who} won't import it: {hard[0]}"
+    if force:
+        return None
+    soft = [r for r in v["rejections"]]
+    if v["release"] and v["release"]["tracks"] != len(item["tracks"]):
+        return f"The release has {v['release']['tracks']} tracks, the folder {len(item['tracks'])}"
+    if soft:
+        return f"{who} advises against it: {soft[0]}"
+    return None
+
+
+def item_from_download(name, folder, files, busy, source):
+    exts = {os.path.splitext(f)[1].lower() for f in files}
+    kind = "none" if not files else "flac" if exts == {".flac"} else "mp3" if exts == {".mp3"} else "mixed"
+    inst = {"flac": "flac", "mp3": "mp3"}.get(kind)
+    tr = tracks(files, flac=kind == "flac", checks=not busy) if files else []
+    tags = download_tags(files) if files else {}
+    item_id = download_id(name)
+    main, _ = covers(item_id, [folder], files, [], []) if files else (False, [])
+    item = {
+        "id": item_id, "name": name, "kind": kind, "inst": inst, "busy": busy,
+        "artist": tags.get("artist") or "", "title": tags.get("album") or name, "date": tags.get("date", "")[:4],
+        "tracks": tr, "seconds": round(sum(t["secs"] or 0 for t in tr), 1),
+        "bytes": sum(os.path.getsize(f) for f in files), "damaged": sum(1 for t in tr if t.get("damaged")),
+        "source": source and {"user": source[0], "when": source[1][:19].replace(" ", "T")},
+        "first_seen": datetime.fromtimestamp(os.path.getmtime(folder)).isoformat(timespec="seconds"),
+        "cover": main, "lidarr": None, "add": None, "releases": [], "blocked": None, "force_ok": False,
+        "_dir": folder, "_files": files,
+    }
+    if inst and not busy and not item["damaged"]:
+        if not CONF["downloads_in"].get(inst):
+            item["blocked"] = ("The MP3 Lidarr can't see the downloads folder" if inst == "mp3"
+                               else "Lidarr-FLAC can't see the downloads folder")
+        else:
+            v = lidarr_view(inst, name, folder, files)
+            item["lidarr"] = v
+            if not v.get("error") and v["albums"] == 0:
+                item["add"] = lookup_album(inst, tags, name)
+            if v.get("album_id"):
+                item["releases"] = release_options(v["album_id"], inst)
+                item["artist"], item["title"] = v["artist"] or item["artist"], v["title"] or item["title"]
+            elif item["add"] and not item["artist"]:
+                item["artist"], item["title"] = item["add"]["artist"], item["add"]["title"]
+    item["blocked"] = import_block(item)
+    item["force_ok"] = bool(item["blocked"]) and import_block(item, force=True) is None
+    item["allowed"] = (["import"] if not item["blocked"] else []) + (["import_anyway"] if item["force_ok"] else []) \
+        + (["add"] if item["add"] and item["lidarr"] and item["lidarr"]["albums"] == 0 else []) \
+        + (["release"] if len(item["releases"]) > 1 else []) + (["bin"] if not busy else [])
+    return item
+
+
+def scan_downloads():
+    """List the download folders and write downloads.json. Nothing moves."""
+    root = CONF["downloads_dir"]
+    items = []
+    if os.path.isdir(root):
+        done, busy = transfer_folders()
+        for name in sorted(os.listdir(root)):
+            folder = os.path.join(root, name)
+            if name in CONF["downloads_skip"] or name.startswith(".") or os.path.islink(folder) or not os.path.isdir(folder):
+                continue
+            items.append(item_from_download(name, folder, fm.folder_audio([folder]), name in busy, done.get(name)))
+        fm.save_cache()
+    old = {str(i["id"]): i.get("first_seen") for i in fm.load_json(DOWNLOADS, {}).get("items", [])}
+    for i in items:
+        i["first_seen"] = old.get(str(i["id"])) or i["first_seen"]
+    fm.save_json(DOWNLOADS, {"checked": now(), "items": items})
+    return items
+
+
+def find_download(item_id):
+    for i in fm.load_json(DOWNLOADS, {}).get("items", []):
+        if i["id"] == item_id:
+            if not os.path.isdir(i["_dir"]):
+                raise SystemExit("that download folder is gone; press Update")
+            return i
+    raise SystemExit(f"download {item_id} is not listed; press Update")
+
+
+def wait_command(inst, cmd_id, minutes=15):
+    for _ in range(minutes * 30):
+        c = lidarr(inst, f"/command/{cmd_id}")
+        if c.get("status") in ("completed", "failed", "aborted", "cancelled"):
+            return c
+        time.sleep(2)
+    return {"status": "timeout"}
+
+
+def fetch_bytes(url, headers=None):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=60) as r:
+            if r.status == 200 and r.headers.get("Content-Type", "").startswith("image/"):
+                return r.read()
+    except Exception:
+        pass
+    return None
+
+
+def fetch_cover(inst, album_id):
+    """Put a cover.jpg beside an imported album's files, if it has none: Lidarr's own
+    picture of the album, else the Cover Art Archive's for the release or release group.
+    Returns the file written, or None (no art anywhere, or the folder already has some)."""
+    files = lidarr(inst, f"/trackfile?albumId={album_id}")
+    if not isinstance(files, list) or not files:
+        return None
+    roots = lidarr(inst, "/rootfolder")
+    root = (roots[0]["path"] if isinstance(roots, list) and roots else "/music").rstrip("/")
+    inside = os.path.dirname(files[0]["path"])
+    if not inside.startswith(root + "/"):
+        return None
+    folder = os.path.join(CONF["flac_src" if inst == "flac" else "mp3_root"], os.path.relpath(inside, root))
+    if not os.path.isdir(folder) or any(n.lower().endswith((".jpg", ".jpeg", ".png")) for n in os.listdir(folder)):
+        return None
+    album = lidarr(inst, f"/album/{album_id}")
+    data = None
+    for im in album.get("images") or []:
+        if im.get("coverType") == "cover" and im.get("url"):
+            data = fetch_bytes(CONF[f"{inst}_api"].replace("/api/v1", "") + im["url"], {"X-Api-Key": api_key(inst)})
+            break
+    rel = next((r["foreignReleaseId"] for r in album.get("releases", []) if r.get("monitored")), None)
+    for kind, mbid in (("release", rel), ("release-group", album.get("foreignAlbumId"))):
+        if data or not mbid:
+            continue
+        data = fetch_bytes(f"https://coverartarchive.org/{kind}/{mbid}/front-500", {"User-Agent": "sift/1 (roon)"})
+    if not data:
+        return None
+    out = os.path.join(folder, "cover.jpg")
+    with open(out + ".tmp", "wb") as f:
+        f.write(data)
+    os.replace(out + ".tmp", out)
+    shrink(out)
+    return out
+
+
+def download_import(item, force=False):
+    """One ManualImport for the whole folder, importMode move, checked again first."""
+    inst, name, folder, files = item["inst"], item["name"], item["_dir"], item["_files"]
+    if fm.folder_audio([folder]) != files:
+        raise RuntimeError("the folder's files have changed since it was listed: press Update, then try again")
+    if force and not item.get("force_ok"):
+        raise RuntimeError("Import anyway can't get past what blocks this one")
+    fresh = dict(item, lidarr=lidarr_view(inst, name, folder, files))
+    fresh["blocked"] = None
+    blocked = import_block(fresh, force=force)
+    if blocked:
+        raise RuntimeError(f"not imported: {blocked}")
+    rows = fresh["lidarr"]["_rows"]
+    payload = [{"path": r["path"], "artistId": r["artist"]["id"], "albumId": r["album"]["id"],
+                "albumReleaseId": r.get("albumReleaseId"), "trackIds": [t["id"] for t in r["tracks"]],
+                "quality": r.get("quality"), "indexerFlags": r.get("indexerFlags", 0), "disableReleaseSwitching": True}
+               for r in rows]
+    label = f"{fresh['lidarr']['artist']} — {fresh['lidarr']['title']}"
+    en = Entry("import_download", {"id": item["id"], "artist": fresh["lidarr"]["artist"], "title": fresh["lidarr"]["title"]})
+    en.d["ops"].append({"op": "import", "inst": inst, "album": fresh["lidarr"]["album_id"], "files": len(payload), "folder": name})
+    en.journal()
+    cmd = lidarr(inst, "/command", "POST", {"name": "ManualImport", "files": payload, "importMode": "move", "replaceExistingFiles": False})
+    en.d["ops"][0]["command"] = cmd.get("id")
+    en.journal()
+    done = wait_command(inst, cmd.get("id")) if cmd.get("id") else {"status": "completed"}
+    left = fm.folder_audio([folder])
+    if done.get("status") != "completed" or left:
+        drop_journal(en.d)
+        raise RuntimeError(f"Lidarr's import {done.get('status', 'ended')} with {len(left)} of {len(files)} files still in the folder"
+                           + (f": {done.get('message')}" if done.get("message") else "")
+                           + ". Nothing is recorded; look in Lidarr's Activity, then press Update")
+    # the folder is left holding cover art and the like: into the bin, so nothing is deleted here
+    if os.path.isdir(folder):
+        en.to_bin(folder)
+    try:
+        cover_file = fetch_cover(inst, fresh["lidarr"]["album_id"])
+        if cover_file:
+            en.d["ops"].append({"op": "cover", "file": cover_file})
+    except Exception as e:
+        log(f"WARNING: no cover fetched for {label} ({e})")
+    save_entry(en.d)
+    log(f"imported download {name} into Lidarr{'-FLAC' if inst == 'flac' else ''} as {label} ({len(payload)} files)")
+
+
+def download_add(item):
+    """Add the album Add to Lidarr named, unmonitored, so the folder can be filed under it."""
+    inst, add = item["inst"], item.get("add")
+    if not add:
+        raise RuntimeError("nothing to add: MusicBrainz has no match for this folder")
+    hits = lidarr(inst, "/album/lookup?term=" + urllib.parse.quote("lidarr:" + add["mbid"]))
+    alb = next((h for h in hits if h.get("foreignAlbumId") == add["mbid"]), None) if isinstance(hits, list) else None
+    if not alb:
+        raise RuntimeError("Lidarr no longer finds that album on MusicBrainz")
+    roots = lidarr(inst, "/rootfolder")
+    root = roots[0] if isinstance(roots, list) and roots else {"path": "/music"}
+    alb["artist"].update({"rootFolderPath": root["path"], "monitored": False,
+                          "qualityProfileId": root.get("defaultQualityProfileId") or 1,
+                          "metadataProfileId": root.get("defaultMetadataProfileId") or 1,
+                          "addOptions": {"monitor": "none", "searchForMissingAlbums": False}})
+    alb.update({"monitored": False, "addOptions": {"searchForNewAlbum": False}})
+    res = lidarr(inst, "/album", "POST", alb)
+    log(f"added to Lidarr{'-FLAC' if inst == 'flac' else ''} for a download: {add['artist']} — {add['title']} (album {res.get('id')})")
+    wait_refresh(inst)
+
+
+def wait_refresh(inst, minutes=3):
+    """Adding an artist queues a refresh that fills in its albums and tracks; until it is
+    done, the manual-import lookup matches the folder to whatever is there so far."""
+    for _ in range(minutes * 30):
+        try:
+            cmds = lidarr(inst, "/command")
+        except Exception:
+            return
+        if not any(c.get("status") in ("queued", "started") and str(c.get("name", "")).startswith("Refresh")
+                   for c in cmds if isinstance(c, dict)):
+            return
+        time.sleep(2)
+
+
+def download_release(item, n):
+    v = item.get("lidarr") or {}
+    options = item.get("releases") or []
+    if not v.get("album_id") or not 0 <= n < len(options):
+        raise RuntimeError("no such release for this download")
+    set_release(v["album_id"], options[n]["release"], inst=item["inst"])
+    log(f"download {item['name']}: release now {options[n]['title']} ({options[n]['tracks']} tracks)")
+
+
+def download_bin(item):
+    en = Entry("bin_download", {"id": item["id"], "artist": item["artist"] or item["name"], "title": item["title"]})
+    en.d["label"] = f"{item['artist']} — {item['title']}" if item["artist"] else item["name"]
+    en.to_bin(item["_dir"])
+    save_entry(en.d)
+    log(f"download put in the bin: {item['name']}")
+
+
+def download(item_id, action, arg=None):
+    with Lock():
+        item = find_download(item_id)
+        if action == "import" or action == "import-anyway":
+            if action.replace("-", "_") not in item["allowed"]:
+                raise SystemExit("not available for this download")
+            download_import(item, force=action == "import-anyway")
+        elif action == "add":
+            if "add" not in item["allowed"]:
+                raise SystemExit("not available for this download")
+            download_add(item)
+        elif action == "release":
+            download_release(item, int(arg))
+        elif action == "bin":
+            if "bin" not in item["allowed"]:
+                raise SystemExit("not available for this download")
+            download_bin(item)
+        else:
+            raise SystemExit("unknown download action")
+        scan_downloads()
+    if action in ("import", "import-anyway") and not os.environ.get("SIFT_NO_REBUILD"):
+        check()                                    # so the album shows as Arriving straight away
+
+
+
+# ---- artwork Simon supplies ---------------------------------------------------------
+# A picture dropped on an album page is written into every one of its files and saved as
+# cover.jpg beside them. What was there before (each file's embedded pictures, any cover
+# file) goes in the bin with the entry, so Undo puts it back.
+
+UPLOADS = os.path.join(STATE, "uploads")       # the web app saves each dropped picture here
+ART_PX = 1500
+
+
+def art_bytes(path):
+    """The picture as JPEG no wider than ART_PX, whatever was dropped. Refuses anything
+    Pillow can't read as a JPEG or PNG."""
+    from PIL import Image
+    import io
+    with Image.open(path) as im:
+        if im.format not in ("JPEG", "PNG"):
+            raise RuntimeError(f"not a JPEG or PNG ({im.format})")
+        im = im.convert("RGB")
+        im.thumbnail((ART_PX, ART_PX))
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=90)
+        return out.getvalue(), im.size
+
+
+def art_files(item):
+    """Which files get the picture: a download's, or an album's FLAC side."""
+    if item.get("_dir"):
+        return item["_files"], [item["_dir"]]
+    files = item["_files"]["flac"]
+    return files, sorted({os.path.dirname(p) for p in files})
+
+
+def embed_art(en, path, data, w, h):
+    """Replace the pictures in one file, keeping the old ones in the bin for Undo. The file
+    keeps its timestamp: that is when it arrived, and the Arriving hold counts from it."""
+    st = os.stat(path)
+    try:
+        kept = embed_art_now(en, path, data, w, h)
+    finally:
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    return kept
+
+
+def embed_art_now(en, path, data, w, h):
+    keep_dir = os.path.join(os.path.dirname(bin_dir(en.d["id"], path)), "art")
+    kept = []
+    if path.lower().endswith(".flac"):
+        f = mutagen.flac.FLAC(path)
+        for k, pic in enumerate(f.pictures):
+            kp = os.path.join(keep_dir, f"{os.path.basename(path)}.{k}.pic")
+            os.makedirs(keep_dir, exist_ok=True)
+            with open(kp, "wb") as out:
+                out.write(pic.write())
+            kept.append(kp)
+        pic = mutagen.flac.Picture()
+        pic.type, pic.mime, pic.width, pic.height, pic.depth, pic.data = 3, "image/jpeg", w, h, 24, data
+        f.clear_pictures()
+        f.add_picture(pic)
+        f.save()
+    else:
+        try:
+            f = mutagen.id3.ID3(path)
+        except mutagen.id3.ID3NoHeaderError:
+            f = mutagen.id3.ID3()
+        for k, frame in enumerate(f.getall("APIC")):
+            kp = os.path.join(keep_dir, f"{os.path.basename(path)}.{k}.pic")
+            os.makedirs(keep_dir, exist_ok=True)
+            with open(kp, "wb") as out:
+                out.write(frame.data)
+            kept.append({"file": kp, "mime": frame.mime, "type": int(frame.type), "desc": frame.desc})
+        f.delall("APIC")
+        f.add(mutagen.id3.APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=data))
+        f.save(path)
+    return kept
+
+
+def restore_art(o):
+    """Undo one file's pictures from what embed_art kept, keeping the timestamp too."""
+    path = o["file"]
+    st = os.stat(path)
+    try:
+        restore_art_now(o)
+    finally:
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def restore_art_now(o):
+    path = o["file"]
+    if path.lower().endswith(".flac"):
+        f = mutagen.flac.FLAC(path)
+        f.clear_pictures()
+        for kp in o["kept"]:
+            pic = mutagen.flac.Picture(open(kp, "rb").read())
+            f.add_picture(pic)
+        f.save()
+    else:
+        f = mutagen.id3.ID3(path)
+        f.delall("APIC")
+        for k in o["kept"]:
+            f.add(mutagen.id3.APIC(encoding=3, mime=k["mime"], type=k["type"], desc=k["desc"], data=open(k["file"], "rb").read()))
+        f.save(path)
+
+
+def set_art(item, upload):
+    """Write the dropped picture into the album's files and beside them."""
+    real = os.path.realpath(upload)
+    if not real.startswith(os.path.realpath(UPLOADS) + "/") or not os.path.isfile(real):
+        raise SystemExit("the picture must be one the app saved")
+    files, folders = art_files(item)
+    if not files:
+        raise SystemExit("no files to write the picture into")
+    if any(t.get("damaged") for t in (item.get("tracks") or (item.get("flac") or {}).get("tracks") or [])):
+        raise SystemExit("some files fail flac -t; nothing is written into damaged files")
+    data, (w, h) = art_bytes(real)
+    label = f"{item['artist']} — {item['title']}"
+    en = Entry("art", {"id": item["id"], "artist": item["artist"], "title": item["title"]})
+    try:
+        # any cover file already there goes in the bin first, then ours is written
+        for d in folders:
+            for name in sorted(os.listdir(d)):
+                if name.lower().endswith((".jpg", ".jpeg", ".png")):
+                    en.to_bin(os.path.join(d, name))
+        op = {"op": "embed", "files": [], "pending": True}
+        en.d["ops"].append(op)
+        en.journal()
+        for p in files:
+            kept = embed_art(en, p, data, w, h)
+            op["files"].append({"file": p, "kept": kept})
+            en.journal()
+        del op["pending"]
+        for d in folders:
+            out = os.path.join(d, "cover.jpg")
+            with open(out, "wb") as f:
+                f.write(data)
+            en.d["ops"].append({"op": "wrote", "file": out})
+            en.journal()
+    except Exception as e:
+        failed = []
+        undo_ops(en.d["ops"], failed)
+        if failed:
+            en.d["ops"], en.d["interrupted"] = failed, True
+            en.d["label"] += " (rollback incomplete: undo to put it back)"
+            save_entry(en.d)
+        else:
+            drop_journal(en.d)
+        raise RuntimeError(f"artwork not written: {e}")
+    save_entry(en.d)
+    for name in os.listdir(COVERS):                # Sift's own thumbnails of it are stale now
+        if name.split("-")[0].split(".")[0] == str(item["id"]):
+            os.remove(os.path.join(COVERS, name))
+    os.remove(real)
+    log(f"artwork written into {len(files)} files: {label}")
+
+
+def art(item_id, upload):
+    real = os.path.realpath(upload)
+    if not real.startswith(os.path.realpath(UPLOADS) + "/") or not os.path.isfile(real):
+        raise SystemExit("the picture must be one the app saved")
+    with Lock():
+        if item_id >= DOWNLOAD_BASE and item_id < HEALTH_BASE:
+            item = find_download(item_id)
+            set_art(item, upload)
+            scan_downloads()
+        else:
+            item = find_item(item_id)
+            set_art(item, upload)
+            refresh_queue()
+
+
+
 def main():
     os.makedirs(STATE, exist_ok=True)
     a = sys.argv[1:]
@@ -2238,6 +2834,16 @@ def main():
             track_tool(int(a[1]), a[0], a[2:])
         elif len(a) == 3 and a[0] == "adopt":
             adopt(a[1], a[2])
+        elif a == ["downloads"]:
+            scan_downloads()
+        elif len(a) == 3 and a[0] == "art" and a[1].isdigit():
+            art(int(a[1]), a[2])
+        elif len(a) == 3 and a[0] == "fetch-cover" and a[1] in ("flac", "mp3") and a[2].isdigit():
+            print(fetch_cover(a[1], int(a[2])) or "no cover found, or the folder already has one")
+        elif len(a) in (3, 4) and a[0] == "download" and a[1].isdigit() \
+                and a[2] in ("import", "import-anyway", "add", "release", "bin") \
+                and (len(a) == 3) == (a[2] != "release") and (len(a) == 3 or a[3].isdigit()):
+            download(int(a[1]), a[2], a[3] if len(a) == 4 else None)
         elif a[:1] == ["strip-id3"]:
             strip_id3(a[1:] or None)
         else:

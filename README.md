@@ -17,8 +17,17 @@ the MP3 you already have and sorted into a queue:
 | Library health | An album already in `/mnt/roon-music/FLAC` whose files fail `flac -t` or mostly stop short, from the nightly health check |
 | Library duplicates | An album in both `/mnt/roon-music/FLAC` and `/mnt/roon-music/MP3`, matched by folder name |
 | Arriving | Imported in the last 3 hours; checked next time |
+| Downloads | Folders downloaded by hand in slskd (`/DATA/AppData/slskd/downloads`, except `_keep`). Soularr only imports what it fetched itself, so these wait here. Each shows how Lidarr-FLAC would file it; **Import** hands the whole folder to Lidarr in one `ManualImport` command (importMode move), which renames it into the library, and the album then arrives in the queue. **Add to Lidarr** adds an album Lidarr doesn't have, unmonitored. **Import anyway** (password) overrides Lidarr's advice for a knowingly partial album. After the import a `cover.jpg` is put beside the files if the folder has no picture, from Lidarr's image of the album or else the Cover Art Archive. The emptied folder goes in the bin; an import can't be undone from there, the album is decided in the queue instead. MP3 folders wait until the MP3 Lidarr has a mount for the downloads folder (`downloads_in` in `bin/sift.py`) |
+
+**Artwork.** Drop a JPEG or PNG on an album or download page (or press Set artwork) and it is
+written into every file on the FLAC side as the embedded picture, resized to 1500 px at most, with
+a `cover.jpg` beside them. Each file's old pictures and any old cover file go in the bin with the
+entry, so Undo puts them back. The picture is the one thing the browser sends that is not an id;
+the server keeps it under `~/.local/state/sift/uploads/` and the engine reads it from there only.
 
 Nothing moves until you approve a decision in the app. Nothing is deleted until you empty the bin.
+The one move Sift doesn't make itself is a download's import, which Lidarr does; it is recorded
+in the bin all the same.
 
 ## Pieces
 

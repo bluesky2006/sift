@@ -1,4 +1,5 @@
 import base64
+import mutagen, mutagen.flac, mutagen.id3
 #!/usr/bin/env python3
 """Sift engine tests, in a throwaway sandbox: real moves, real rsync, fake Lidarr.
 
@@ -1065,6 +1066,165 @@ r = sift("empty-bin", ok=False)
 check(r.returncode != 0 and "won't parse" in r.stdout + r.stderr and os.path.isfile(f"{STATE}/pending/garbled.json"),
       "stops the job before Empty bin can delete its files, and is kept")
 os.remove(f"{STATE}/pending/garbled.json")
+
+print("downloads")
+DL = f"{T}/slskd/downloads"
+dconf = {**conf, "downloads_dir": DL, "downloads_skip": ["_keep"], "downloads_in": {"flac": "/data/dl", "mp3": None},
+         "bins": {**conf["bins"], f"{T}/slskd": f"{T}/slskd/Sift-bin"}, "plain_bins": [f"{T}/slskd"],
+         "transfers_db": f"file:{T}/no-transfers.db?mode=ro", "flac_db": f"file:{T}/no-lidarr.db?mode=ro"}
+json.dump(dconf, open(f"{T}/conf.json", "w"))
+S.CONF.update(dconf)
+S.DOWNLOADS = f"{STATE}/downloads.json"
+os.environ["SIFT_NO_REBUILD"] = "1"
+for name, files in (("Fresh Album", ["01.flac", "02.flac"]), ("_keep", ["x.flac"]), ("Mixed", ["01.flac", "02.mp3"]),
+                    ("Mp3 Only", ["01.mp3"]), ("Unknown", ["01.flac"]), ("Short", ["01.flac"])):
+    for f in files:
+        tone(f"{DL}/{name}/{f}", "flac" if f.endswith(".flac") else "libmp3lame")
+open(f"{DL}/Fresh Album/cover.txt", "w").write("art")            # something Lidarr leaves behind
+row = lambda folder, f, n, why=(): {"path": f"/data/dl/{folder}/{f}", "artist": {"id": 5, "artistName": "Art"},
+                                   "album": {"id": 50, "title": "Fresh"}, "albumReleaseId": 500, "quality": {"quality": {"id": 6}},
+                                   "tracks": [{"id": n, "trackNumber": str(n), "title": f"T{n}"}], "rejections": [{"reason": w} for w in why]}
+lidarr_calls = []
+def fake_lidarr(inst, path, method="GET", body=None):
+    lidarr_calls.append((inst, method, path, body))
+    if path.startswith("/manualimport?folder=/data/dl/Fresh"):
+        return [row("Fresh Album", "01.flac", 1), row("Fresh Album", "02.flac", 2)]
+    if path.startswith("/manualimport?folder=/data/dl/Short"):
+        return [row("Short", "01.flac", 1, ["Has missing tracks"])]
+    if path.startswith("/manualimport"):
+        return [{"path": f"/data/dl/Unknown/01.flac", "tracks": [], "rejections": [{"reason": "Couldn't find similar album"}]}]
+    if path.startswith("/album/lookup"):
+        return [{"foreignAlbumId": "mb-new", "title": "Found It", "releaseDate": "2020-01-01", "albumType": "Album",
+                 "artist": {"artistName": "Someone", "foreignArtistId": "mb-art"}, "releases": []}]
+    if path == "/rootfolder":
+        return [{"path": "/music", "defaultQualityProfileId": 2, "defaultMetadataProfileId": 1}]
+    if path == "/command" and body["name"] == "ManualImport":
+        for f in body["files"]:                       # Lidarr moves the files: here they just go
+            os.remove(f["path"].replace("/data/dl", DL))
+        return {"id": 7}
+    if path.startswith("/command/"):
+        return {"status": "completed"}
+    if path == "/album":
+        return {"id": 51}
+    if path.startswith("/trackfile?albumId=50"):
+        return [{"path": "/music/Art/Fresh/01.flac"}]
+    if path == "/album/50":
+        return {"foreignAlbumId": "mb-fresh", "images": [{"coverType": "cover", "url": "/MediaCover/Albums/50/cover.jpg"}],
+                "releases": [{"foreignReleaseId": "rel-fresh", "monitored": True}]}
+    return {}
+real_lidarr, S.lidarr = S.lidarr, fake_lidarr
+fetched = []
+S.fetch_bytes = lambda url, headers=None: fetched.append(url) or (b"\xff\xd8not really a jpeg" if "MediaCover" in url else None)
+os.makedirs(f"{DATA}/music-flac/Art/Fresh", exist_ok=True)           # where Lidarr puts the import
+items = {i["name"]: i for i in S.scan_downloads()}
+check(sorted(items) == ["Fresh Album", "Mixed", "Mp3 Only", "Short", "Unknown"], "every download folder is listed, but not _keep")
+fresh = items["Fresh Album"]
+check(fresh["allowed"] == ["import", "bin"] and fresh["lidarr"]["artist"] == "Art" and fresh["lidarr"]["unmapped"] == 0
+      and fresh["artist"] == "Art" and fresh["title"] == "Fresh", "a folder Lidarr can file offers Import, named as Lidarr would file it")
+check(items["Mixed"]["allowed"] == ["bin"] and "both FLAC and MP3" in items["Mixed"]["blocked"], "a folder mixing FLAC and MP3 is refused")
+check(items["Mp3 Only"]["allowed"] == ["bin"] and "MP3 Lidarr" in items["Mp3 Only"]["blocked"], "an MP3 folder waits until the MP3 Lidarr can see the downloads folder")
+unknown = items["Unknown"]
+check(unknown["allowed"] == ["add", "bin"] and "add it first" in unknown["blocked"] and unknown["add"]["title"] == "Found It"
+      and unknown["artist"] == "Someone", "an album Lidarr doesn't know offers Add, with what MusicBrainz found")
+short = items["Short"]
+check(short["allowed"] == ["import_anyway", "bin"] and "missing tracks" in short["blocked"].lower(),
+      "Lidarr's advice against a partial album blocks Import, and only Import anyway gets past it")
+check(all(k not in json.dumps({k2: v for k2, v in fresh.items() if not k2.startswith("_")}) for k in (DL,)), "the listing carries paths only under _ keys")
+
+S.download(unknown["id"], "add")
+post = next(c for c in lidarr_calls if c[1] == "POST" and c[2] == "/album")
+check(post[3]["monitored"] is False and post[3]["artist"]["rootFolderPath"] == "/music" and post[3]["artist"]["monitored"] is False
+      and post[3]["artist"]["qualityProfileId"] == 2 and post[3]["addOptions"]["searchForNewAlbum"] is False,
+      "Add posts the album unmonitored, under the root folder, with nothing set searching")
+try:
+    S.download(short["id"], "import")
+    raised = None
+except SystemExit as e:
+    raised = str(e)
+check(raised and "not available" in raised and os.path.isfile(f"{DL}/Short/01.flac"), "Import is refused where only Import anyway is offered")
+bins_before = len(load(f"{STATE}/bin.json")["entries"])
+S.download(fresh["id"], "import")
+cmd = next(c for c in lidarr_calls if c[1] == "POST" and c[2] == "/command")
+check(cmd[3]["importMode"] == "move" and len(cmd[3]["files"]) == 2 and cmd[3]["files"][0]["trackIds"] == [1]
+      and cmd[3]["files"][0]["albumId"] == 50 and cmd[3]["files"][1]["path"] == "/data/dl/Fresh Album/02.flac",
+      "Import sends one ManualImport for every file, importMode move")
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1 and entry["decision"] == "import_download"
+      and entry["ops"][0] == {"op": "import", "inst": "flac", "album": 50, "files": 2, "folder": "Fresh Album", "command": 7}
+      and not os.path.exists(f"{DL}/Fresh Album") and os.path.isfile(f"{T}/slskd/Sift-bin/{entry['id']}/downloads/Fresh Album/cover.txt"),
+      "the import is recorded in the bin, and what Lidarr left in the folder goes there too")
+check(os.path.isfile(f"{DATA}/music-flac/Art/Fresh/cover.jpg") and entry["ops"][-1] == {"op": "cover", "file": f"{DATA}/music-flac/Art/Fresh/cover.jpg"}
+      and fetched[0].endswith("/MediaCover/Albums/50/cover.jpg") and len(fetched) == 1,
+      "a cover from Lidarr's picture of the album lands beside the imported files, and is recorded")
+S.fetch_bytes = lambda url, headers=None: fetched.append(url) or None
+check(S.fetch_cover("flac", 50) is None and len(fetched) == 1, "a folder that already has a picture is left alone")
+os.remove(f"{DATA}/music-flac/Art/Fresh/cover.jpg")
+check(S.fetch_cover("flac", 50) is None and fetched[-2:] == ["https://coverartarchive.org/release/rel-fresh/front-500", "https://coverartarchive.org/release-group/mb-fresh/front-500"]
+      and not os.path.exists(f"{DATA}/music-flac/Art/Fresh/cover.jpg"), "with no picture in Lidarr, the Cover Art Archive is tried for the release then the release group, and nothing is written when both are empty")
+check(S.undo_problems(entry, load(f"{STATE}/bin.json")["entries"]) and "Lidarr imported" in S.undo_problems(entry, load(f"{STATE}/bin.json")["entries"])[0],
+      "an import can't be undone from the bin: the album is decided in the queue instead")
+check("Fresh Album" not in {i["name"] for i in load(f"{STATE}/downloads.json")["items"]}, "and the listing no longer shows it")
+def half_import(inst, path, method="GET", body=None):
+    if path == "/command" and body["name"] == "ManualImport":
+        os.remove(body["files"][0]["path"].replace("/data/dl", DL))    # one file moved, one stuck
+        return {"id": 8}
+    return fake_lidarr(inst, path, method, body)
+tone(f"{DL}/Fresh Album/01.flac", "flac"), tone(f"{DL}/Fresh Album/02.flac", "flac")
+S.scan_downloads()
+S.lidarr = half_import
+try:
+    S.download(S.download_id("Fresh Album"), "import")
+    raised = None
+except RuntimeError as e:
+    raised = str(e)
+S.lidarr = fake_lidarr
+check(raised and "1 of 2 files still in the folder" in raised and len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1
+      and not os.listdir(f"{STATE}/pending"), "an import Lidarr leaves half done is reported, recorded nowhere, and leaves no journal")
+S.download(items["Mixed"]["id"], "bin")
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(entry["decision"] == "bin_download" and not os.path.exists(f"{DL}/Mixed")
+      and os.path.isfile(f"{T}/slskd/Sift-bin/{entry['id']}/downloads/Mixed/01.flac"), "Delete download puts the folder in the bin")
+S.lidarr = real_lidarr
+r = sift("undo", entry["id"])
+check(r.returncode == 0 and os.path.isfile(f"{DL}/Mixed/01.flac"), "and Undo brings it back")
+r = sift("download", "1", "rm", ok=False)
+check(r.returncode != 0, "an unknown download action is refused")
+
+print("artwork")
+from PIL import Image
+os.makedirs(f"{STATE}/uploads", exist_ok=True)
+os.makedirs(S.COVERS, exist_ok=True)
+Image.new("RGB", (2000, 2000), "red").save(f"{STATE}/uploads/77-a.png")
+Image.new("RGB", (10, 10), "blue").save(f"{T}/old.jpg")
+tone(f"{DATA}/music-flac/Pic/Alb/01.flac", "flac"), tone(f"{DATA}/music-flac/Pic/Alb/02.flac", "flac")
+shutil.copy(f"{T}/old.jpg", f"{DATA}/music-flac/Pic/Alb/folder.jpg")
+old_pic = mutagen.flac.Picture(); old_pic.type, old_pic.mime, old_pic.data = 3, "image/jpeg", open(f"{T}/old.jpg", "rb").read()
+f1 = mutagen.flac.FLAC(f"{DATA}/music-flac/Pic/Alb/01.flac"); f1.add_picture(old_pic); f1.save()
+os.utime(f"{DATA}/music-flac/Pic/Alb/01.flac", (1_600_000_000, 1_600_000_000))
+pic_item = {"id": 77, "artist": "Pic", "title": "Alb", "flac": {"tracks": []}, "_files": {"flac": [f"{DATA}/music-flac/Pic/Alb/01.flac", f"{DATA}/music-flac/Pic/Alb/02.flac"]}}
+bins_before = len(load(f"{STATE}/bin.json")["entries"])
+S.set_art(pic_item, f"{STATE}/uploads/77-a.png")
+pics = [mutagen.flac.FLAC(f"{DATA}/music-flac/Pic/Alb/0{k}.flac").pictures for k in (1, 2)]
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(len(pics[0]) == 1 and len(pics[1]) == 1 and pics[0][0].mime == "image/jpeg" and pics[0][0].width == 1500 and pics[0][0].data == pics[1][0].data,
+      "the dropped picture becomes the one embedded picture in every FLAC, as a JPEG no wider than 1500")
+check(os.path.getmtime(f"{DATA}/music-flac/Pic/Alb/01.flac") == 1_600_000_000, "the file keeps its timestamp, so the Arriving hold does not start again")
+check(os.path.isfile(f"{DATA}/music-flac/Pic/Alb/cover.jpg") and not os.path.exists(f"{DATA}/music-flac/Pic/Alb/folder.jpg")
+      and os.path.isfile(f"{DATA}/Sift-bin/{entry['id']}/music-flac/Pic/Alb/folder.jpg"), "cover.jpg is written beside them, and the old cover file goes in the bin")
+check(entry["decision"] == "art" and len(entry["ops"][1]["files"][0]["kept"]) == 1 and entry["ops"][1]["files"][1]["kept"] == []
+      and not os.path.exists(f"{STATE}/uploads/77-a.png"), "the entry keeps each file's old pictures, and the upload is cleared")
+r = sift("undo", entry["id"])
+pics = [mutagen.flac.FLAC(f"{DATA}/music-flac/Pic/Alb/0{k}.flac").pictures for k in (1, 2)]
+check(r.returncode == 0 and len(pics[0]) == 1 and pics[0][0].data == old_pic.data and pics[1] == []
+      and not os.path.exists(f"{DATA}/music-flac/Pic/Alb/cover.jpg") and os.path.isfile(f"{DATA}/music-flac/Pic/Alb/folder.jpg"),
+      "Undo puts the old pictures back, takes away the cover.jpg Sift wrote, and returns the old cover file")
+tone(f"{DL}/Tape/01.mp3", "libmp3lame")
+Image.new("RGB", (300, 300), "green").save(f"{STATE}/uploads/d.jpg")
+S.set_art({"id": S.download_id("Tape"), "artist": "", "title": "Tape", "tracks": [], "_dir": f"{DL}/Tape", "_files": [f"{DL}/Tape/01.mp3"]}, f"{STATE}/uploads/d.jpg")
+apic = mutagen.id3.ID3(f"{DL}/Tape/01.mp3").getall("APIC")
+check(len(apic) == 1 and apic[0].mime == "image/jpeg" and os.path.isfile(f"{DL}/Tape/cover.jpg"), "an MP3 download gets the picture as its APIC frame, and a cover.jpg")
+r = sift("art", "77", "/etc/hostname", ok=False)
+check(r.returncode != 0 and "the app saved" in r.stdout + r.stderr, "a picture from anywhere but the app's uploads folder is refused")
 
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")

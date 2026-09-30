@@ -25,10 +25,12 @@ const PYTHON = process.env.SIFT_PYTHON || '/usr/bin/python3';
 
 // Audio is only ever served from these, whatever queue.json says.
 const AUDIO_ROOTS = (process.env.SIFT_AUDIO_ROOTS
-  || '/mnt/roon-data/music-flac,/mnt/roon-music/MP3,/mnt/roon-music/FLAC-damaged,/mnt/roon-music/FLAC').split(',');
+  || '/mnt/roon-data/music-flac,/mnt/roon-music/MP3,/mnt/roon-music/FLAC-damaged,/mnt/roon-music/FLAC,/DATA/AppData/slskd/downloads').split(',');
 const FFMPEG = process.env.SIFT_FFMPEG || 'ffmpeg';
 
 const DECISIONS = new Set(['keep_flac', 'keep_mp3', 'refetch', 'watch_on', 'watch_off', 'bin_album', 'dismiss']);
+// what can be done with a hand-made Soulseek download; the engine checks each against the folder again
+const DOWNLOAD_ACTIONS = new Set(['import', 'import_anyway', 'add', 'release', 'bin']);
 const MANY = new Set(['keep_flac', 'keep_mp3', 'refetch']);
 
 // ---- helpers ---------------------------------------------------------------
@@ -56,6 +58,19 @@ const cookie = (value) =>
   `${auth.COOKIE}=${encodeURIComponent(value)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${auth.SESSION_DAYS * 86400}`;
 
 class BadBody extends Error {}
+// a dropped picture: raw bytes, only ever from our own page, kept under STATE/uploads
+const ART_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png' };
+const ART_LIMIT = 12 * 1024 * 1024;
+async function readRaw(req, limit) {
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > limit) throw new BadBody('picture too large (12 MB at most)');
+    chunks.push(c);
+  }
+  return Buffer.concat(chunks);
+}
 async function readBody(req, limit = 16 * 1024) {
   const chunks = [];
   let size = 0;
@@ -78,7 +93,7 @@ const MIME = {
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
   '.webmanifest': 'application/manifest+json',
 };
-const STATIC = new Set(['/app.js', '/style.css', '/login.js', '/icon.svg', '/apple-touch-icon.png',
+const STATIC = new Set(['/app.js', '/style.css', '/login.js', '/icon.svg', '/chevron.svg', '/chevron-dark.svg', '/apple-touch-icon.png',
   '/icon-192.png', '/icon-512.png', '/site.webmanifest']);
 
 async function serveStatic(res, name) {
@@ -392,8 +407,15 @@ async function handle(req, res) {
         damaged: i.flac.tracks.filter((t) => t.damaged).length } : null,
       mp3: i.mp3 ? { n: i.mp3.tracks.length, fmt: (i.mp3.tracks[0] || {}).fmt || '' } : null,
     }));
+    const d = await readState('downloads.json', { items: [] });
+    const downloads = d.items.map((i) => ({
+      id: i.id, name: i.name, artist: i.artist, title: i.title, kind: i.kind, busy: i.busy, cover: i.cover,
+      first_seen: i.first_seen, blocked: i.blocked, allowed: i.allowed, damaged: i.damaged, bytes: i.bytes,
+      n: i.tracks.length, fmt: (i.tracks[0] || {}).fmt || '', source: i.source ? { user: i.source.user } : null,
+      lidarr: i.lidarr && !i.lidarr.error ? { artist: i.lidarr.artist, title: i.lidarr.title } : null,
+    }));
     return json(res, 200, {
-      built: q.built, checked: q.checked, previous_check: q.previous_check, items,
+      built: q.built, checked: q.checked, previous_check: q.previous_check, items, downloads, downloads_checked: d.checked,
       bin: b.entries.map((e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 }))
         .reverse(),
       staged: (await readStaged(q)).map((e) => {
@@ -423,11 +445,28 @@ async function handle(req, res) {
     return json(res, 200, { ...pub(item), no_mp3: item.status === 'no_mp3', ...(paths ? { paths } : {}) });
   }
 
-  if ((m = /^\/api\/audio\/(\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && (req.method === 'GET' || req.method === 'HEAD')) {
+  // a track's file: an album's by side and index, or a download's ("d" + id, side flac) by index
+  const trackFile = async (id, side, idx) => {
+    if (id.startsWith('d')) {
+      const d = await readState('downloads.json', { items: [] });
+      const item = d.items.find((i) => i.id === Number(id.slice(1)));
+      return side === 'flac' && item && item._files ? item._files[Number(idx)] : undefined;
+    }
     const q = await readState('queue.json', { items: [] });
-    const item = q.items.find((i) => i.id === Number(m[1]));
-    const file = item && item._files && (item._files[m[2]] || [])[Number(m[3])];
+    const item = q.items.find((i) => i.id === Number(id));
+    return item && item._files && (item._files[side] || [])[Number(idx)];
+  };
+  if ((m = /^\/api\/audio\/(d?\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && (req.method === 'GET' || req.method === 'HEAD')) {
+    const file = await trackFile(m[1], m[2], m[3]);
     return file ? streamFile(req, res, file) : send(res, 404, 'not found');
+  }
+  if ((m = /^\/api\/download\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const d = await readState('downloads.json', { items: [] });
+    const item = d.items.find((i) => i.id === Number(m[1]));
+    if (!item) return json(res, 404, { error: 'not listed' });
+    // the folder's name and each file's name inside it are the only paths shown
+    const inside = (f) => (f.startsWith(item._dir + '/') ? path.relative(path.dirname(item._dir), f) : null);
+    return json(res, 200, { ...pub(item), paths: (item._files || []).map(inside) });
   }
 
   if ((m = /^\/api\/cover\/(\d+)(?:\/(flac|mp3))?$/.exec(p)) && req.method === 'GET') {
@@ -437,10 +476,8 @@ async function handle(req, res) {
     } catch { return send(res, 404, 'not found'); }
   }
 
-  if ((m = /^\/api\/spectrum\/(\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && req.method === 'GET') {
-    const q = await readState('queue.json', { items: [] });
-    const item = q.items.find((i) => i.id === Number(m[1]));
-    const file = item && item._files && (item._files[m[2]] || [])[Number(m[3])];
+  if ((m = /^\/api\/spectrum\/(d?\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const file = await trackFile(m[1], m[2], m[3]);
     if (!file) return send(res, 404, 'not found');
     const out = await spectrum(file);
     if (out === 'refused') return send(res, 404, 'not found');
@@ -460,8 +497,31 @@ async function handle(req, res) {
       audit({ event: 'csrf-rejected', path: p });
       return json(res, 403, { error: 'bad CSRF token' });
     }
-    const body = await readBody(req);
     const busy = () => json(res, 409, { error: 'another job is still running' });
+    if ((m = /^\/api\/art\/(\d+)$/.exec(p))) {
+      // artwork for an album or a download: the picture's bytes are the one thing the browser
+      // sends that isn't an id. Saved under STATE/uploads; the engine reads it from there only.
+      const id = Number(m[1]);
+      const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+      if (!ART_TYPES[type]) { req.resume(); return json(res, 415, { error: 'a JPEG or PNG, please' }); }
+      const q = await readState('queue.json', { items: [] });
+      const d = await readState('downloads.json', { items: [] });
+      const item = q.items.find((i) => i.id === id && i.flac && i.flac.tracks.length)
+        || d.items.find((i) => i.id === id && !i.busy && i.tracks.length);
+      if (!item) { req.resume(); return json(res, 404, { error: 'nothing to write it into' }); }
+      const bytes = await readRaw(req, ART_LIMIT);
+      if (!bytes.length) return json(res, 400, { error: 'no picture' });
+      const dir = path.join(STATE, 'uploads');
+      await fsp.mkdir(dir, { recursive: true });
+      const file = path.join(dir, `${id}-${Date.now().toString(36)}.${ART_TYPES[type]}`);
+      await fsp.writeFile(file, bytes);
+      const label = item.artist ? `${item.artist} — ${item.title}` : item.name;
+      audit({ event: 'art', id, bytes: bytes.length, label });
+      const j = startJob('art', ['art', String(id), file], `Writing artwork: ${label}`);
+      if (!j) { await fsp.unlink(file).catch(() => {}); return busy(); }
+      return json(res, 202, { job: j.id });
+    }
+    const body = await readBody(req);
 
     if (p === '/api/decide') {
       const id = Number(body.id);
@@ -585,6 +645,41 @@ async function handle(req, res) {
       if (r === 'none') return json(res, 400, { error: 'none of those are staged' });
       const { j, go } = r;
       return json(res, 202, { job: j.id, n: go.length });
+    }
+    if (p === '/api/download') {
+      // a hand-made Soulseek download: an id from downloads.json and an action from the fixed
+      // list; a release is an index into the list that download offers
+      const id = Number(body.id);
+      if (!Number.isInteger(id) || !DOWNLOAD_ACTIONS.has(body.action)) return json(res, 400, { error: 'bad request' });
+      const d = await readState('downloads.json', { items: [] });
+      const item = d.items.find((i) => i.id === id);
+      if (!item) return json(res, 404, { error: 'not listed' });
+      if (!item.allowed.includes(body.action)) return json(res, 400, { error: 'not available for this download' });
+      const label = item.artist ? `${item.artist} — ${item.title}` : item.name;
+      const args = ['download', String(id), body.action.replace('_', '-')];
+      if (body.action === 'release') {
+        const n = (item.releases || []).length;
+        if (!Number.isInteger(body.release) || body.release < 0 || body.release >= n) return json(res, 400, { error: 'bad release' });
+        args.push(String(body.release));
+      }
+      if (body.action === 'import_anyway') {
+        // overriding Lidarr's advice is the danger tier: the password again, sharing the sign-in lockout
+        if (!auth.startAttempt(req.socket.remoteAddress)) return json(res, 429, { error: 'too many attempts, wait 5 minutes' });
+        await new Promise((r) => setTimeout(r, 500));
+        if (typeof body.password !== 'string' || !auth.verifyPassword(body.password, a)) {
+          audit({ event: 'import-anyway-denied', ip: req.socket.remoteAddress });
+          return json(res, 401, { error: 'wrong password' });
+        }
+        auth.clearFailures(req.socket.remoteAddress);
+      }
+      audit({ event: 'download', id, action: body.action, release: body.release, label });
+      const kinds = { import: 'Importing', import_anyway: 'Importing anyway', add: 'Adding to Lidarr', release: 'Changing the release of', bin: 'Binning' };
+      const j = startJob(`download_${body.action}`, args, `${kinds[body.action]}: ${label}`);
+      return j ? json(res, 202, { job: j.id }) : busy();
+    }
+    if (p === '/api/downloads') {
+      const j = startJob('downloads', ['downloads'], 'Listing downloads');
+      return j ? json(res, 202, { job: j.id }) : busy();
     }
     if (p === '/api/check') {
       const j = startJob('check', ['check'], 'Checking for new arrivals');
