@@ -16,7 +16,7 @@ the MP3 you already have and sorted into a queue:
 | Needs a look | FLAC folder holds another album's audio, spans folders, or the destination already exists |
 | Library health | An album already in `/mnt/roon-music/FLAC` whose files fail `flac -t` or mostly stop short, from the nightly health check |
 | Library duplicates | An album in both `/mnt/roon-music/FLAC` and `/mnt/roon-music/MP3`, matched by folder name |
-| Arriving | Imported in the last 3 hours; checked next time |
+| Arriving | Imported in the last 30 minutes; checked next time (every 30 minutes) |
 | Downloads | Folders downloaded by hand in slskd (`/DATA/AppData/slskd/downloads`, except `_keep`). Soularr only imports what it fetched itself, so these wait here. Each shows how Lidarr-FLAC would file it; **Import** hands the whole folder to Lidarr in one `ManualImport` command (importMode move), which renames it into the library, and the album then arrives in the queue. **Add to Lidarr** adds an album Lidarr doesn't have, unmonitored. **Import anyway** (password) overrides Lidarr's advice for a knowingly partial album. After the import a `cover.jpg` is put beside the files if the folder has no picture, from Lidarr's image of the album or else the Cover Art Archive. The emptied folder goes in the bin; an import can't be undone from there, the album is decided in the queue instead. MP3 folders wait until the MP3 Lidarr has a mount for the downloads folder (`downloads_in` in `bin/sift.py`) |
 
 **Artwork.** Drop a JPEG or PNG on an album or download page (or press Set artwork) and it is
