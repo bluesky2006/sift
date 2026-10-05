@@ -1189,6 +1189,25 @@ r = sift("undo", entry["id"])
 check(r.returncode == 0 and os.path.isfile(f"{DL}/Mixed/01.flac"), "and Undo brings it back")
 r = sift("download", "1", "rm", ok=False)
 check(r.returncode != 0, "an unknown download action is refused")
+tone(f"{DL}/Nobody/01.flac", "flac")
+import mutagen.flac
+m = mutagen.flac.FLAC(f"{DL}/Nobody/01.flac")
+m.update({"albumartist": "Space Afrika", "album": "Quiet: Storm", "date": "2026-01-01"})
+m.save()
+os.makedirs(f"{MUSIC}/FLAC/space afrika", exist_ok=True)
+S.lidarr = lambda inst, path, method="GET", body=None: [] if path.startswith("/album/lookup") else fake_lidarr(inst, path, method, body)
+nobody = {i["name"]: i for i in S.scan_downloads()}["Nobody"]
+check(nobody["allowed"] == ["keep", "bin"] and nobody["keep"] == "FLAC/space afrika/Quiet_ Storm (2026)"
+      and "keep it as is" in nobody["blocked"], "a FLAC folder nobody can place offers Keep as is, under the existing artist folder")
+check(unknown["keep"] is None, "an album MusicBrainz can add doesn't offer Keep")
+S.download(nobody["id"], "keep")
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(entry["decision"] == "keep_download" and not os.path.exists(f"{DL}/Nobody")
+      and os.path.isfile(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm (2026)/01.flac"), "Keep as is moves the folder into the FLAC library")
+S.lidarr = real_lidarr
+r = sift("undo", entry["id"])
+check(r.returncode == 0 and os.path.isfile(f"{DL}/Nobody/01.flac") and not os.path.exists(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm (2026)"),
+      "and Undo puts it back in the downloads")
 
 print("artwork")
 from PIL import Image

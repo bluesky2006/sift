@@ -286,7 +286,7 @@ async function followJob() {
           undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.',
           download_import: 'Imported. The album is in Arriving until Sift checks it.', download_import_anyway: 'Imported. The album is in Arriving until Sift checks it.',
           download_add: 'Added to Lidarr, unmonitored, and the folder checked against it again.', download_release: 'Release changed, and the folder checked again.',
-          download_bin: 'The download is in the bin.' }[job.kind];
+          download_keep: 'Kept, in the Roon FLAC library. Undo is in the bin.', download_bin: 'The download is in the bin.' }[job.kind];
         if (note) toast(note);
       } else if (inline) {
         toast('The check failed. History has the error.');
@@ -1021,11 +1021,12 @@ async function renderDownload(id) {
     import_anyway: ['Import anyway', `${a.blocked}. Importing anyway is how albums were broken before: only do it when you know the folder is what you want. Enter the password to confirm.`],
     add: ['Add to Lidarr', a.add ? `${a.add.artist} — ${a.add.title}${a.add.year ? ` (${a.add.year})` : ''} is added to ${who} unmonitored, so nothing goes looking for it, and the folder is checked against it again.` : ''],
     release: ['Change release', 'Which release of the album these files are. Pick the one whose track count matches the folder.'],
+    keep: ['Keep as is', `The folder moves into the Roon FLAC library as ${a.keep}, with its files and tags as they are. Lidarr never hears of it. Undo is in the bin.`],
     bin: ['Delete download', 'The folder goes in the bin. Nothing is deleted until you empty the bin, and Undo is there until then.'],
   };
-  const icon = { import: 'inbox', import_anyway: 'inbox', add: 'plus', release: 'list', bin: 'trash' };
-  const buttons = ['import', 'add', 'release', 'import_anyway', 'bin'].filter((d) => a.allowed.includes(d))
-    .map((d) => `<button class="${d === 'import' ? 'primary' : d === 'import_anyway' ? 'danger' : d === 'bin' ? 'ghost' : ''}" data-act="${d}">${ic(icon[d])}${texts[d][0]}</button>`);
+  const icon = { import: 'inbox', import_anyway: 'inbox', add: 'plus', release: 'list', keep: 'check', bin: 'trash' };
+  const buttons = ['import', 'keep', 'add', 'release', 'import_anyway', 'bin'].filter((d) => a.allowed.includes(d))
+    .map((d) => `<button class="${d === 'import' || d === 'keep' ? 'primary' : d === 'import_anyway' ? 'danger' : d === 'bin' ? 'ghost' : ''}" data-act="${d}">${ic(icon[d])}${texts[d][0]}</button>`);
   const tools = mode === 'spectra'
     ? `<div class="tools"><span class="hint">Each track's spectrum. A FLAC made from an MP3 goes dark well below the top.</span><button id="tcancel" class="primary">${ic('check')}Done</button></div>`
     : n ? `<div class="tools"><button id="tspectra">${ic('wave')}Spectrograms</button>${!a.busy && !a.damaged
@@ -1083,7 +1084,7 @@ async function renderDownload(id) {
       }
       if (await ask({ title: `${title}?`, body, ok: title, danger: d === 'bin' })) {
         if (d === 'import') { tab = 'arriving'; localStorage.setItem('sift-tab', tab); }
-        go({ action: d }, d === 'import' || d === 'bin' ? '#/' : null);
+        go({ action: d }, d === 'import' || d === 'keep' || d === 'bin' ? '#/' : null);
       }
     };
   });
@@ -1345,7 +1346,7 @@ const OUTCOME = { bin: ['In the bin', ''], undone: ['Undone', 'muted'], emptied:
 const DECIDED_MANY = { 'apply-staged': 'Approve staged', check: 'Check', undo: 'Undo', 'empty-bin': 'Empty bin',
   pair: 'Pair tracks', unpair: 'Forget a pair', one_album: 'One album', watch_on: 'Watch for a better FLAC',
   watch_off: 'Stop watching', dismiss: 'Looks fine', downloads: 'List downloads', download_import: 'Import download',
-  download_import_anyway: 'Import download anyway', download_add: 'Add to Lidarr', download_release: 'Change release', download_bin: 'Bin download' };
+  download_import_anyway: 'Import download anyway', download_add: 'Add to Lidarr', download_release: 'Change release', download_keep: 'Keep download as is', download_bin: 'Bin download' };
 
 async function renderHistory() {
   document.title = 'History · Sift';

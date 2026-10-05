@@ -2362,7 +2362,7 @@ def import_block(item, force=False):
         return v["error"]
     who = "Lidarr-FLAC" if item["inst"] == "flac" else "the MP3 Lidarr"
     if v["albums"] == 0:
-        return f"{who} doesn't know this album" + (": add it first" if item.get("add") else ", and MusicBrainz has nothing to add")
+        return f"{who} doesn't know this album" + (": add it first" if item.get("add") else ", and MusicBrainz has nothing to add" + (": keep it as is" if keep_dest(item) else ""))
     if v["albums"] > 1:
         return f"{who} files these tracks under {v['albums']} different albums"
     if v["unmapped"]:
@@ -2416,8 +2416,31 @@ def item_from_download(name, folder, files, busy, source):
     item["force_ok"] = bool(item["blocked"]) and import_block(item, force=True) is None
     item["allowed"] = (["import"] if not item["blocked"] else []) + (["import_anyway"] if item["force_ok"] else []) \
         + (["add"] if item["add"] and item["lidarr"] and item["lidarr"]["albums"] == 0 else []) \
-        + (["release"] if len(item["releases"]) > 1 else []) + (["bin"] if not busy else [])
+        + (["release"] if len(item["releases"]) > 1 else []) + (["keep"] if keep_dest(item) else []) \
+        + (["bin"] if not busy else [])
+    k = keep_dest(item)
+    item["keep"] = k and "FLAC/" + os.path.relpath(k, CONF["flac_dest"])
     return item
+
+
+def keep_dest(item):
+    """Where Keep as is files a FLAC download nobody can place (Lidarr doesn't know it and
+    MusicBrainz has nothing to add): straight into the Roon FLAC library as Artist/Album
+    (Year), named from its tags. None when Keep isn't on offer."""
+    v = item.get("lidarr")
+    if item["kind"] != "flac" or item["busy"] or item["damaged"] or not v or v.get("error") \
+            or v["albums"] != 0 or item.get("add") or not item["artist"] or not item["title"]:
+        return None
+    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x).strip(" .")[:120]
+    artist, title = clean(item["artist"]), clean(item["title"])
+    if not artist or not title:
+        return None
+    root = CONF["flac_dest"]
+    try:   # merge "XEXA" into an existing "Xexa", as the migration does
+        artist = next((d for d in os.listdir(root) if d.casefold() == artist.casefold()), artist)
+    except OSError:
+        pass
+    return os.path.join(root, artist, f"{title} ({item['date']})" if item["date"] else title)
 
 
 def scan_downloads():
@@ -2599,6 +2622,21 @@ def download_bin(item):
     log(f"download put in the bin: {item['name']}")
 
 
+def download_keep(item):
+    """Move the folder, as it is, into the Roon FLAC library. Undo moves it back."""
+    dest = keep_dest(item)
+    if not dest:
+        raise RuntimeError("Keep as is is only for a FLAC folder Lidarr and MusicBrainz can't place")
+    if fm.folder_audio([item["_dir"]]) != item["_files"]:
+        raise RuntimeError("the folder's files have changed since it was listed: press Update, then try again")
+    if os.path.exists(dest):
+        raise RuntimeError(f"already in the FLAC library: {os.path.relpath(dest, CONF['flac_dest'])}")
+    en = Entry("keep_download", {"id": item["id"], "artist": item["artist"], "title": item["title"]})
+    en.move(item["_dir"], dest)
+    save_entry(en.d)
+    log(f"download kept as is: {item['name']} -> {dest}")
+
+
 def download(item_id, action, arg=None):
     with Lock():
         item = find_download(item_id)
@@ -2616,6 +2654,10 @@ def download(item_id, action, arg=None):
             if "bin" not in item["allowed"]:
                 raise SystemExit("not available for this download")
             download_bin(item)
+        elif action == "keep":
+            if "keep" not in item["allowed"]:
+                raise SystemExit("not available for this download")
+            download_keep(item)
         else:
             raise SystemExit("unknown download action")
         scan_downloads()
@@ -2841,7 +2883,7 @@ def main():
         elif len(a) == 3 and a[0] == "fetch-cover" and a[1] in ("flac", "mp3") and a[2].isdigit():
             print(fetch_cover(a[1], int(a[2])) or "no cover found, or the folder already has one")
         elif len(a) in (3, 4) and a[0] == "download" and a[1].isdigit() \
-                and a[2] in ("import", "import-anyway", "add", "release", "bin") \
+                and a[2] in ("import", "import-anyway", "add", "release", "keep", "bin") \
                 and (len(a) == 3) == (a[2] != "release") and (len(a) == 3 or a[3].isdigit()):
             download(int(a[1]), a[2], a[3] if len(a) == 4 else None)
         elif a[:1] == ["strip-id3"]:
