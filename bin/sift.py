@@ -2252,22 +2252,29 @@ def download_id(name):
 
 
 def transfer_folders():
-    """Each download folder's Soulseek user and last finish, and which folders still have a
-    transfer going. slskd names the local folder after the remote one's last part."""
-    done, busy = {}, set()
+    """Each download folder's Soulseek user and last finish, which folders still have a
+    transfer going, and per folder each file's last attempt (file name: succeeded). slskd
+    names the local folder after the remote one's last part. Soularr clears finished and
+    failed transfers from slskd's list, but they stay in this database."""
+    done, busy, last = {}, set(), {}
     try:
         db = sqlite3.connect(CONF["transfers_db"], uri=True)
         rows = db.execute("select Username, Filename, State, EndedAt from Transfers where Direction = 'Download'").fetchall()
     except Exception:
-        return done, busy
+        return done, busy, {}
     for user, name, state, ended in rows:
         parts = name.replace("\\", "/").split("/")
         folder = parts[-2] if len(parts) > 1 else ""
         if not state & 16:                        # not yet Completed
             busy.add(folder)
-        elif state == 48 and (ended or "") >= done.get(folder, ("", ""))[1]:   # Completed | Succeeded
+            continue
+        if state == 48 and (ended or "") >= done.get(folder, ("", ""))[1]:   # Completed | Succeeded
             done[folder] = (user, ended or "")
-    return done, busy
+        files = last.setdefault(folder, {})
+        if (ended or "") >= files.get(parts[-1], ("", False))[0]:
+            files[parts[-1]] = (ended or "", state == 48)
+    failed = {f: sorted(n for n, (_, ok) in files.items() if not ok) for f, files in last.items()}
+    return done, busy, failed
 
 
 def download_tags(files):
@@ -2448,12 +2455,16 @@ def scan_downloads():
     root = CONF["downloads_dir"]
     items = []
     if os.path.isdir(root):
-        done, busy = transfer_folders()
+        done, busy, failed = transfer_folders()
         for name in sorted(os.listdir(root)):
             folder = os.path.join(root, name)
             if name in CONF["downloads_skip"] or name.startswith(".") or os.path.islink(folder) or not os.path.isdir(folder):
                 continue
-            items.append(item_from_download(name, folder, fm.folder_audio([folder]), name in busy, done.get(name)))
+            item = item_from_download(name, folder, fm.folder_audio([folder]), name in busy, done.get(name))
+            # files whose last attempt failed and that aren't in the folder anyway
+            have = set(os.listdir(folder))
+            item["failed"] = [n for n in failed.get(name, []) if n not in have][:50]
+            items.append(item)
         fm.save_cache()
     old = {str(i["id"]): i.get("first_seen") for i in fm.load_json(DOWNLOADS, {}).get("items", [])}
     for i in items:

@@ -389,3 +389,4 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 /* a picture being dragged over an album page: the cover is where it lands */
 body.dropping .cover { outline: 3px dashed var(--accent); outline-offset: 4px; }
 body.dropping .ahead::after { content: "Drop the picture to set the artwork"; color: var(--accent); font-size: 13px; font-weight: 600; }
+.source.warn { color: var(--warn); }

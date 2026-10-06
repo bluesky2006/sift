@@ -1209,6 +1209,23 @@ r = sift("undo", entry["id"])
 check(r.returncode == 0 and os.path.isfile(f"{DL}/Nobody/01.flac") and not os.path.exists(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm (2026)"),
       "and Undo puts it back in the downloads")
 
+import sqlite3
+if os.path.exists(f"{T}/transfers.db"):
+    os.remove(f"{T}/transfers.db")
+tdb = sqlite3.connect(f"{T}/transfers.db")
+tdb.execute("create table Transfers (Username, Direction, Filename, State, EndedAt)")
+tdb.executemany("insert into Transfers values ('u', 'Download', ?, ?, ?)", [
+    ("x\\Part\\01.mp3", 48, "2026-10-05 22:00"), ("x\\Part\\02.mp3", 144, "2026-10-05 21:00"),
+    ("x\\Part\\03.mp3", 144, "2026-10-05 21:00"), ("x\\Part\\03.mp3", 48, "2026-10-05 22:00"),
+    ("x\\Part\\04.mp3", 272, "2026-10-05 21:00")])
+tdb.commit()
+S.CONF["transfers_db"] = f"file:{T}/transfers.db?mode=ro"
+tone(f"{DL}/Part/01.mp3", "libmp3lame"), tone(f"{DL}/Part/03.mp3", "libmp3lame"), tone(f"{DL}/Part/04.mp3", "libmp3lame")
+part = {i["name"]: i for i in S.scan_downloads()}["Part"]
+check(part["failed"] == ["02.mp3"], "a file whose last attempt failed, and isn't in the folder, is listed as never arrived")
+S.CONF["transfers_db"] = dconf["transfers_db"]
+shutil.rmtree(f"{DL}/Part")
+
 print("artwork")
 from PIL import Image
 os.makedirs(f"{STATE}/uploads", exist_ok=True)

@@ -348,6 +348,7 @@ function row(i) {
     if (i.busy) badges.push('<span class="badge warn">downloading</span>');
     if (i.damaged) badges.push(`<span class="badge bad">${i.damaged} damaged</span>`);
     if (i.allowed.includes('import')) badges.push('<span class="badge decision">ready to import</span>');
+    if (i.failed && i.failed.length) badges.push(`<span class="badge warn">${i.failed.length} missing</span>`);
     if (i.source) badges.push(`<span class="badge">from ${esc(i.source.user)}</span>`);
     return `<a class="row" href="#/download/${i.id}">${i.cover ? `<img class="thumb" src="/api/cover/${i.id}" alt="" loading="lazy">` : '<span class="thumb none"></span>'}
       <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
@@ -1053,6 +1054,7 @@ async function renderDownload(id) {
       ${a.add && !filed ? `<li>MusicBrainz has ${esc(a.add.artist)} — ${esc(a.add.title)}${a.add.year ? ` (${esc(a.add.year)})` : ''}${a.add.type ? `, ${esc(a.add.type.toLowerCase())}` : ''}, ${a.add.by_id ? "the release the files' tags name" : 'found by name, so check it is the right one'}</li>` : ''}
       ${a.lidarr && a.lidarr.error ? `<li>${esc(a.lidarr.error)}</li>` : ''}</ul>
     ${a.source ? `<p class="source">From Soulseek user <b>${esc(a.source.user)}</b>${a.source.when ? ` · finished ${esc(day(a.source.when, true))}` : ''}</p>` : ''}
+    ${a.failed && a.failed.length ? `<p class="source warn"><b>${a.failed.length} file${a.failed.length === 1 ? '' : 's'} never arrived:</b> ${a.failed.map(esc).join(', ')}. Soulseek gave up on ${a.failed.length === 1 ? 'it' : 'them'}; search again in slskd to fetch ${a.failed.length === 1 ? 'it' : 'them'} into this folder.</p>` : ''}
     <div class="decisions">${mode === 'view' ? buttons.join('') : ''}</div>
     ${tools}${table}`;
 
