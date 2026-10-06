@@ -2271,9 +2271,12 @@ def transfer_folders():
         if state == 48 and (ended or "") >= done.get(folder, ("", ""))[1]:   # Completed | Succeeded
             done[folder] = (user, ended or "")
         files = last.setdefault(folder, {})
-        if (ended or "") >= files.get(parts[-1], ("", False))[0]:
-            files[parts[-1]] = (ended or "", state == 48)
-    failed = {f: sorted(n for n, (_, ok) in files.items() if not ok) for f, files in last.items()}
+        if (ended or "") >= files.get(parts[-1], ("", False, ""))[0]:
+            files[parts[-1]] = (ended or "", state == 48, user)
+    # a failure counts only from a user who delivered something to the folder: an abandoned
+    # attempt from someone else (the FLAC that never started, before the MP3 that did) isn't missing
+    givers = {f: {u for _, ok, u in files.values() if ok} for f, files in last.items()}
+    failed = {f: sorted(n for n, (_, ok, u) in files.items() if not ok and u in givers[f]) for f, files in last.items()}
     return done, busy, failed
 
 
@@ -2426,23 +2429,28 @@ def item_from_download(name, folder, files, busy, source):
         + (["release"] if len(item["releases"]) > 1 else []) + (["keep"] if keep_dest(item) else []) \
         + (["bin"] if not busy else [])
     k = keep_dest(item)
-    item["keep"] = k and "FLAC/" + os.path.relpath(k, CONF["flac_dest"])
+    item["keep"] = k and ("MP3/" + os.path.relpath(k, CONF["mp3_root"]) if item["kind"] == "mp3"
+                          else "FLAC/" + os.path.relpath(k, CONF["flac_dest"]))
     return item
 
 
 def keep_dest(item):
-    """Where Keep as is files a FLAC download nobody can place (Lidarr doesn't know it and
-    MusicBrainz has nothing to add): straight into the Roon FLAC library as Artist/Album
-    (Year), named from its tags. None when Keep isn't on offer."""
+    """Where Keep as is files a download, as Artist/Album (Year) named from its tags: an MP3
+    folder into the MP3 library, a FLAC one nobody can place (Lidarr doesn't know it and
+    MusicBrainz has nothing to add) into the Roon FLAC library. None when Keep isn't on offer."""
     v = item.get("lidarr")
-    if item["kind"] != "flac" or item["busy"] or item["damaged"] or not v or v.get("error") \
-            or v["albums"] != 0 or item.get("add") or not item["artist"] or not item["title"]:
+    if item["busy"] or item["damaged"] or not item["artist"] or not item["title"]:
+        return None
+    if item["kind"] == "mp3":
+        root = CONF["mp3_root"]                  # the MP3 Lidarr can't see downloads: Keep is the way in
+    elif item["kind"] == "flac" and v and not v.get("error") and v["albums"] == 0 and not item.get("add"):
+        root = CONF["flac_dest"]
+    else:
         return None
     clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x).strip(" .")[:120]
     artist, title = clean(item["artist"]), clean(item["title"])
     if not artist or not title:
         return None
-    root = CONF["flac_dest"]
     try:   # merge "XEXA" into an existing "Xexa", as the migration does
         artist = next((d for d in os.listdir(root) if d.casefold() == artist.casefold()), artist)
     except OSError:
@@ -2462,8 +2470,8 @@ def scan_downloads():
                 continue
             item = item_from_download(name, folder, fm.folder_audio([folder]), name in busy, done.get(name))
             # files whose last attempt failed and that aren't in the folder anyway
-            have = set(os.listdir(folder))
-            item["failed"] = [n for n in failed.get(name, []) if n not in have][:50]
+            have = {os.path.splitext(n)[0].casefold() for n in os.listdir(folder)}
+            item["failed"] = [n for n in failed.get(name, []) if os.path.splitext(n)[0].casefold() not in have][:50]
             items.append(item)
         fm.save_cache()
     old = {str(i["id"]): i.get("first_seen") for i in fm.load_json(DOWNLOADS, {}).get("items", [])}
@@ -2634,14 +2642,14 @@ def download_bin(item):
 
 
 def download_keep(item):
-    """Move the folder, as it is, into the Roon FLAC library. Undo moves it back."""
+    """Move the folder, as it is, into the library. Undo moves it back."""
     dest = keep_dest(item)
     if not dest:
-        raise RuntimeError("Keep as is is only for a FLAC folder Lidarr and MusicBrainz can't place")
+        raise RuntimeError("Keep as is is only for an MP3 folder, or a FLAC one Lidarr and MusicBrainz can't place")
     if fm.folder_audio([item["_dir"]]) != item["_files"]:
         raise RuntimeError("the folder's files have changed since it was listed: press Update, then try again")
     if os.path.exists(dest):
-        raise RuntimeError(f"already in the FLAC library: {os.path.relpath(dest, CONF['flac_dest'])}")
+        raise RuntimeError(f"already in the library: {item['keep']}")
     en = Entry("keep_download", {"id": item["id"], "artist": item["artist"], "title": item["title"]})
     en.move(item["_dir"], dest)
     save_entry(en.d)

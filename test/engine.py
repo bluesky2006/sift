@@ -1218,11 +1218,21 @@ tdb.executemany("insert into Transfers values ('u', 'Download', ?, ?, ?)", [
     ("x\\Part\\01.mp3", 48, "2026-10-05 22:00"), ("x\\Part\\02.mp3", 144, "2026-10-05 21:00"),
     ("x\\Part\\03.mp3", 144, "2026-10-05 21:00"), ("x\\Part\\03.mp3", 48, "2026-10-05 22:00"),
     ("x\\Part\\04.mp3", 272, "2026-10-05 21:00")])
+tdb.executemany("insert into Transfers values ('other', 'Download', ?, 144, '2026-10-05 20:00')",
+                [("y\\Part\\05.flac",), ("y\\Part\\cover.jpg",)])
+tdb.execute("insert into Transfers values ('u', 'Download', 'x\\Part\\06.flac', 144, '2026-10-05 20:00')")
 tdb.commit()
 S.CONF["transfers_db"] = f"file:{T}/transfers.db?mode=ro"
-tone(f"{DL}/Part/01.mp3", "libmp3lame"), tone(f"{DL}/Part/03.mp3", "libmp3lame"), tone(f"{DL}/Part/04.mp3", "libmp3lame")
+tone(f"{DL}/Part/01.mp3", "libmp3lame"), tone(f"{DL}/Part/03.mp3", "libmp3lame"), tone(f"{DL}/Part/04.mp3", "libmp3lame"), tone(f"{DL}/Part/06.mp3", "libmp3lame")
+mf = mutagen.File(f"{DL}/Part/01.mp3", easy=True)
+mf.add_tags() if mf.tags is None else None
+mf.update({"albumartist": "Fohn", "album": "Porcelain", "date": "2026"})
+mf.save()
 part = {i["name"]: i for i in S.scan_downloads()}["Part"]
 check(part["failed"] == ["02.mp3"], "a file whose last attempt failed, and isn't in the folder, is listed as never arrived")
+check("05.flac" not in part["failed"] and "06.flac" not in part["failed"],
+      "an abandoned attempt from a user who sent nothing, or the same track in another format, isn't missing")
+check(part["allowed"] == ["keep", "bin"] and part["keep"] == "MP3/Fohn/Porcelain (2026)", "an MP3 folder offers Keep as is, into the MP3 library")
 S.CONF["transfers_db"] = dconf["transfers_db"]
 shutil.rmtree(f"{DL}/Part")
 
