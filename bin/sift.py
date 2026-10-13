@@ -13,7 +13,7 @@
     sift.py strip-id3 [FOLDER...]      cut ID3v1 tags off the end of intact library FLACs (undo in the bin)
     sift.py adopt PATH LABEL           shell only: put an existing folder in the bin
     sift.py downloads                  list slskd's hand-made downloads, write downloads.json
-    sift.py download ID ACTION         import | import-anyway | add | bin | release N, for a listed download
+    sift.py download ID ACTION         import | import-anyway | add | keep | keep-find | bin | release N, for a listed download
     sift.py fetch-cover INST ALBUM     shell only: put a cover.jpg beside an imported album that has none
     sift.py art ID FILE                write a picture the app saved under state/uploads into the album's files
 
@@ -2427,6 +2427,7 @@ def item_from_download(name, folder, files, busy, source):
     item["allowed"] = (["import"] if not item["blocked"] else []) + (["import_anyway"] if item["force_ok"] else []) \
         + (["add"] if item["add"] and item["lidarr"] and item["lidarr"]["albums"] == 0 else []) \
         + (["release"] if len(item["releases"]) > 1 else []) + (["keep"] if keep_dest(item) else []) \
+        + (["keep_find"] if keep_dest(item) and item["kind"] == "mp3" else []) \
         + (["bin"] if not busy else [])
     k = keep_dest(item)
     item["keep"] = k and ("MP3/" + os.path.relpath(k, CONF["mp3_root"]) if item["kind"] == "mp3"
@@ -2598,6 +2599,13 @@ def download_add(item):
     alb = next((h for h in hits if h.get("foreignAlbumId") == add["mbid"]), None) if isinstance(hits, list) else None
     if not alb:
         raise RuntimeError("Lidarr no longer finds that album on MusicBrainz")
+    res = add_album(inst, alb)
+    log(f"added to Lidarr{'-FLAC' if inst == 'flac' else ''} for a download: {add['artist']} — {add['title']} (album {res.get('id')})")
+    wait_refresh(inst)
+
+
+def add_album(inst, alb):
+    """POST an album from /album/lookup, unmonitored and with no search, under the first root folder."""
     roots = lidarr(inst, "/rootfolder")
     root = roots[0] if isinstance(roots, list) and roots else {"path": "/music"}
     alb["artist"].update({"rootFolderPath": root["path"], "monitored": False,
@@ -2605,9 +2613,30 @@ def download_add(item):
                           "metadataProfileId": root.get("defaultMetadataProfileId") or 1,
                           "addOptions": {"monitor": "none", "searchForMissingAlbums": False}})
     alb.update({"monitored": False, "addOptions": {"searchForNewAlbum": False}})
-    res = lidarr(inst, "/album", "POST", alb)
-    log(f"added to Lidarr{'-FLAC' if inst == 'flac' else ''} for a download: {add['artist']} — {add['title']} (album {res.get('id')})")
-    wait_refresh(inst)
+    return lidarr(inst, "/album", "POST", alb)
+
+
+def flac_wanted(item):
+    """The Lidarr-FLAC album a kept MP3 download is, so Soularr can look for it: the one
+    Lidarr-FLAC already has by name, else MusicBrainz's match, added to Lidarr-FLAC.
+    Returns its id, or raises when neither knows the album."""
+    have = lidarr_flac_album(item["artist"], item["title"])
+    if have:
+        return have["id"]
+    tags = download_tags(item["_files"])
+    found = lookup_album("flac", {**tags, "artist": item["artist"], "album": item["title"]}, item["name"])
+    if not found:
+        raise RuntimeError("neither Lidarr-FLAC nor MusicBrainz knows this album, so there is no FLAC to look for: use Keep as is")
+    hits = lidarr("flac", "/album/lookup?term=" + urllib.parse.quote("lidarr:" + found["mbid"]))
+    alb = next((h for h in hits if h.get("foreignAlbumId") == found["mbid"]), None) if isinstance(hits, list) else None
+    if not alb:
+        raise RuntimeError("Lidarr-FLAC no longer finds that album on MusicBrainz")
+    if alb.get("id"):
+        return alb["id"]                          # already in Lidarr-FLAC under another name
+    res = add_album("flac", alb)
+    log(f"added to Lidarr-FLAC to look for a FLAC: {found['artist']} — {found['title']} (album {res.get('id')})")
+    wait_refresh("flac")
+    return res.get("id")
 
 
 def wait_refresh(inst, minutes=3):
@@ -2641,8 +2670,12 @@ def download_bin(item):
     log(f"download put in the bin: {item['name']}")
 
 
-def download_keep(item):
-    """Move the folder, as it is, into the library. Undo moves it back."""
+def download_keep(item, find=False):
+    """Move the folder, as it is, into the library. Undo moves it back. With `find` (an MP3
+    folder only), the album is also monitored in Lidarr-FLAC so Soularr looks for a FLAC;
+    Undo unmonitors it, though an album added to Lidarr-FLAC for it stays there."""
+    if find and item["kind"] != "mp3":
+        raise RuntimeError("Keep and find a FLAC is only for an MP3 folder")
     dest = keep_dest(item)
     if not dest:
         raise RuntimeError("Keep as is is only for an MP3 folder, or a FLAC one Lidarr and MusicBrainz can't place")
@@ -2650,10 +2683,14 @@ def download_keep(item):
         raise RuntimeError("the folder's files have changed since it was listed: press Update, then try again")
     if os.path.exists(dest):
         raise RuntimeError(f"already in the library: {item['keep']}")
+    album = flac_wanted(item) if find else None   # before anything moves: it can refuse
     en = Entry("keep_download", {"id": item["id"], "artist": item["artist"], "title": item["title"]})
     en.move(item["_dir"], dest)
+    if album:
+        en.ledger("returned", str(album), None)   # or Soularr would pass it over
+        en.monitor("flac", album, True)
     save_entry(en.d)
-    log(f"download kept as is: {item['name']} -> {dest}")
+    log(f"download kept as is: {item['name']} -> {dest}" + (f", FLAC wanted (Lidarr-FLAC album {album})" if album else ""))
 
 
 def download(item_id, action, arg=None):
@@ -2673,10 +2710,10 @@ def download(item_id, action, arg=None):
             if "bin" not in item["allowed"]:
                 raise SystemExit("not available for this download")
             download_bin(item)
-        elif action == "keep":
-            if "keep" not in item["allowed"]:
+        elif action in ("keep", "keep-find"):
+            if action.replace("-", "_") not in item["allowed"]:
                 raise SystemExit("not available for this download")
-            download_keep(item)
+            download_keep(item, find=action == "keep-find")
         else:
             raise SystemExit("unknown download action")
         scan_downloads()
@@ -2902,7 +2939,7 @@ def main():
         elif len(a) == 3 and a[0] == "fetch-cover" and a[1] in ("flac", "mp3") and a[2].isdigit():
             print(fetch_cover(a[1], int(a[2])) or "no cover found, or the folder already has one")
         elif len(a) in (3, 4) and a[0] == "download" and a[1].isdigit() \
-                and a[2] in ("import", "import-anyway", "add", "release", "keep", "bin") \
+                and a[2] in ("import", "import-anyway", "add", "release", "keep", "keep-find", "bin") \
                 and (len(a) == 3) == (a[2] != "release") and (len(a) == 3 or a[3].isdigit()):
             download(int(a[1]), a[2], a[3] if len(a) == 4 else None)
         elif a[:1] == ["strip-id3"]:

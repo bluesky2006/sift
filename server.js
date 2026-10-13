@@ -30,7 +30,7 @@ const FFMPEG = process.env.SIFT_FFMPEG || 'ffmpeg';
 
 const DECISIONS = new Set(['keep_flac', 'keep_mp3', 'refetch', 'watch_on', 'watch_off', 'bin_album', 'dismiss']);
 // what can be done with a hand-made Soulseek download; the engine checks each against the folder again
-const DOWNLOAD_ACTIONS = new Set(['import', 'import_anyway', 'add', 'release', 'keep', 'bin']);
+const DOWNLOAD_ACTIONS = new Set(['import', 'import_anyway', 'add', 'release', 'keep', 'keep_find', 'bin']);
 const MANY = new Set(['keep_flac', 'keep_mp3', 'refetch']);
 
 // ---- helpers ---------------------------------------------------------------
@@ -673,7 +673,7 @@ async function handle(req, res) {
         auth.clearFailures(req.socket.remoteAddress);
       }
       audit({ event: 'download', id, action: body.action, release: body.release, label });
-      const kinds = { import: 'Importing', import_anyway: 'Importing anyway', add: 'Adding to Lidarr', release: 'Changing the release of', keep: 'Keeping', bin: 'Binning' };
+      const kinds = { import: 'Importing', import_anyway: 'Importing anyway', add: 'Adding to Lidarr', release: 'Changing the release of', keep: 'Keeping', keep_find: 'Keeping, and looking for a FLAC of', bin: 'Binning' };
       const j = startJob(`download_${body.action}`, args, `${kinds[body.action]}: ${label}`);
       return j ? json(res, 202, { job: j.id }) : busy();
     }

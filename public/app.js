@@ -1022,15 +1022,20 @@ async function renderDownload(id) {
     import_anyway: ['Import anyway', `${a.blocked}. Importing anyway is how albums were broken before: only do it when you know the folder is what you want. Enter the password to confirm.`],
     add: ['Add to Lidarr', a.add ? `${a.add.artist} — ${a.add.title}${a.add.year ? ` (${a.add.year})` : ''} is added to ${who} unmonitored, so nothing goes looking for it, and the folder is checked against it again.` : ''],
     release: ['Change release', 'Which release of the album these files are. Pick the one whose track count matches the folder.'],
-    keep: ['Keep as is', `The folder moves into the Roon ${a.kind === 'mp3' ? 'MP3' : 'FLAC'} library as ${a.keep}, with its files and tags as they are. Lidarr never hears of it. Undo is in the bin.`],
+    keep: ['Keep as is', `The folder moves into the Roon ${a.kind === 'mp3' ? 'MP3' : 'FLAC'} library as ${a.keep}, with its files and tags as they are.`
+      + (a.allowed.includes('keep_find') ? ' Looking for a FLAC as well marks the album wanted in Lidarr-FLAC (adding it from MusicBrainz if need be), so Soularr fetches one and it comes through the review queue like any other.'
+        : ' Lidarr never hears of it.') + ' Undo is in the bin.'],
     bin: ['Delete download', 'The folder goes in the bin. Nothing is deleted until you empty the bin, and Undo is there until then.'],
   };
   const icon = { import: 'inbox', import_anyway: 'inbox', add: 'plus', release: 'list', keep: 'check', bin: 'trash' };
-  const buttons = ['import', 'keep', 'add', 'release', 'import_anyway', 'bin'].filter((d) => a.allowed.includes(d))
+  // Change release corrects what Import will do rather than deciding anything, so it sits
+  // with the tools; Keep as is asks whether to look for a FLAC instead of being two buttons
+  const buttons = ['import', 'import_anyway', 'keep', 'add', 'bin'].filter((d) => a.allowed.includes(d))
     .map((d) => `<button class="${d === 'import' || d === 'keep' ? 'primary' : d === 'import_anyway' ? 'danger' : d === 'bin' ? 'ghost' : ''}" data-act="${d}">${ic(icon[d])}${texts[d][0]}</button>`);
   const tools = mode === 'spectra'
     ? `<div class="tools"><span class="hint">Each track's spectrum. A FLAC made from an MP3 goes dark well below the top.</span><button id="tcancel" class="primary">${ic('check')}Done</button></div>`
-    : n ? `<div class="tools"><button id="tspectra">${ic('wave')}Spectrograms</button>${!a.busy && !a.damaged
+    : n ? `<div class="tools"><button id="tspectra">${ic('wave')}Spectrograms</button>${mode === 'view' && a.allowed.includes('release')
+      ? `<button data-act="release">${ic('list')}Change release</button>` : ''}${!a.busy && !a.damaged
       ? `<button id="tart">${ic('image')}${a.cover ? 'Replace artwork' : 'Set artwork'}</button>` : ''}</div>` : '';
   const filecell = (k) => {
     const f = v && v.files[k];
@@ -1083,6 +1088,12 @@ async function renderDownload(id) {
             error = 'Wrong password';
           }
         }
+      }
+      if (d === 'keep' && a.allowed.includes('keep_find')) {
+        const answer = await ask({ title: 'Keep the MP3?', body, ok: 'Keep',
+          choices: ['Keep it and look for a FLAC', 'Just keep the MP3'] });
+        if (answer) go({ action: answer.choice === 0 ? 'keep_find' : 'keep' }, '#/');
+        return;
       }
       if (await ask({ title: `${title}?`, body, ok: title, danger: d === 'bin' })) {
         if (d === 'import') { tab = 'arriving'; localStorage.setItem('sift-tab', tab); }
