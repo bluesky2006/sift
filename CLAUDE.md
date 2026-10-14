@@ -16,7 +16,9 @@ rules to keep and the lessons from the first build, are in `~/notes/sift-feature
   `MATCH_VERSION` there whenever fingerprint matching changes.
 - `SUSPECT_HZ` in `bin/sift.py` was calibrated on the queue on 16 Sep 2026. Recalibrate on
   known-genuine albums before moving it. Changing how cutoff or loudness is measured means
-  clearing `cutoff`/`lufs` from the check cache, since cached values are kept.
+  clearing `cutoff`/`lufs` from the check cache, since cached values are kept. `SHARP_EDGE`
+  (sharp encoder lowpass vs gentle roll-off) was set on 14 Oct 2026 against LAME transcodes
+  and the ambient albums kept from the queue that day.
 - `/mnt/roon-data` is NTFS: files deleted while open linger as `.fuse_hidden*`. Stop playback
   before moving files.
 - No API keys in the repo; they are read from each Lidarr's `config.xml`.

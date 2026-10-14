@@ -9,7 +9,7 @@ the MP3 you already have and sorted into a queue:
 | Queue | Meaning |
 |---|---|
 | Ready | Exact match: every FLAC file passes `flac -t`, every MP3 track matches a FLAC track by fingerprint, and the FLAC isn't suspect. Albums with **no MP3 to replace** wait here too, badged: nothing confirms them, so Stage all leaves them out and each is decided on its own. A **refetched** album (sent back from Library health) is fingerprint-checked instead against the copy it replaced, the MP3 it was first retired against or else the old library FLAC, while that copy is still in the bin: matching, it is Ready and goes through Stage all; not, it goes to Different; with both gone, it waits here badged Refetched to be decided on its own |
-| Suspect FLAC | Most FLAC tracks stop below 20.5 kHz, as a FLAC made from an MP3 does (`SUSPECT_HZ` in `bin/sift.py`) |
+| Suspect FLAC | Most FLAC tracks stop below 20.5 kHz with a sharp edge, as a FLAC made from an MP3 does (`SUSPECT_HZ`, `SHARP_EDGE` in `bin/sift.py`); a gentle tape-style roll-off is not counted |
 | Different or unconfirmed version | Some MP3 tracks have no fingerprint match in the FLAC |
 | Doesn't line up | Fewer tracks, a noticeably different length, or an MP3 folder shared with another album |
 | Damaged FLAC | FLAC files fail `flac -t`, including the 20 albums held in `/mnt/roon-music/FLAC-damaged` |

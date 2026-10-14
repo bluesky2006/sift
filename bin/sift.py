@@ -32,7 +32,7 @@ lands in Ready only after every FLAC file passes `flac -t` and every MP3 track m
 FLAC track by fingerprint, and most FLAC tracks reach above SUSPECT_HZ (a FLAC that stops
 lower is usually a converted MP3, and waits in Suspect FLAC instead).
 """
-import base64, collections, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
+import base64, collections, math, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
     urllib.parse, urllib.request, uuid, zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -99,6 +99,11 @@ QUEUES = {"retire": "ready", "no_mp3": "ready", "unconfirmed": "different",
 # the queue: CD-rate FLACs reach 21-22 kHz, LAME 320 stops near 20 kHz, 192 kbps near 19 kHz,
 # 128 kbps near 16 kHz. Old tape and lo-fi recordings can stop lower too, so it's a flag.
 SUSPECT_HZ = 20500
+# An encoder's lowpass is a cliff: just below it the spectrum is still near full strength.
+# Tape, cassette and filtered lo-fi fade out over kilohertz instead. "edge" is the strength
+# 0.1-0.6 kHz below the cutoff over the strength 2-4 kHz below it. Measured on 14 Oct 2026:
+# LAME 128/192/320/V0 transcodes 0.19-0.72; ambient and tape albums Simon kept 0.05-0.09.
+SHARP_EDGE = 0.15
 MEASURE_SECONDS = 60       # the spectrum is taken over this much from the middle of a track
 
 
@@ -245,7 +250,7 @@ def measure(path):
     """Where the spectrum stops, and integrated loudness (EBU R128), from one decode.
     Cached with the file's other facts, so it is redone only when the file changes."""
     e = fm.file_entry(path)
-    if "cutoff" in e and "lufs" in e:
+    if "cutoff" in e and "lufs" in e and ("edge" in e or not stops_below(e.get("cutoff"))):
         return e
     secs = fm.duration(path) or 0
     start = max(0.0, secs / 2 - MEASURE_SECONDS / 2)
@@ -253,7 +258,7 @@ def measure(path):
     graph = (f"[0:a]asplit=2[l][s];[l]ebur128=framelog=quiet,anullsink;"
              f"[s]atrim=start={start:.1f}:duration={MEASURE_SECONDS},aformat=channel_layouts=mono,"
              f"showspectrumpic=s={w}x{h}:legend=0:saturation=0:win_func=bharris[v]")
-    cutoff = lufs = None
+    cutoff = lufs = edge = None
     try:
         r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-v", "info", "-i", path,
                             "-filter_complex", graph, "-map", "[v]", "-frames:v", "1",
@@ -269,15 +274,30 @@ def measure(path):
             rows = [sum(r.stdout[y * w:(y + 1) * w]) / w for y in range(h)]
             if max(rows) >= 20:                      # not silence
                 top = next(y for y, v in enumerate(rows) if v >= 1)
-                cutoff = round((h - top) * int(rate.group(1)) / 2 / h)
+                per = int(rate.group(1)) / 2 / h          # Hz per row
+                cutoff = round((h - top) * per)
+                near = rows[top + math.ceil(90 / per):top + math.ceil(600 / per)]
+                ref = sorted(rows[top + round(2000 / per):top + round(4000 / per)])
+                if near and ref and ref[len(ref) // 2] > 0:
+                    edge = round(sum(near) / len(near) / ref[len(ref) // 2], 2)
         found = re.findall(r"I:\s+(-?[\d.]+) LUFS", err)
         if found and float(found[-1]) > -70:
             lufs = float(found[-1])
     except (subprocess.TimeoutExpired, OSError):
         return e                                  # not cached: measured again next time
     with fm._cache_lock:
-        e["cutoff"], e["lufs"] = cutoff, lufs
+        e["cutoff"], e["lufs"], e["edge"] = cutoff, lufs, edge
     return e
+
+
+def stops_below(cutoff):
+    return bool(cutoff) and cutoff < SUSPECT_HZ
+
+
+def stops_short(t):
+    """A track that stops below SUSPECT_HZ with an encoder's sharp edge. A gentle roll-off
+    is the recording; an edge that couldn't be measured counts as sharp."""
+    return stops_below(t.get("cutoff")) and (t.get("edge") is None or t["edge"] >= SHARP_EDGE)
 
 
 def tracks(files, flac=False, checks=True):
@@ -298,6 +318,8 @@ def tracks(files, flac=False, checks=True):
             t["bad_at"] = i.get("bad_at") or []
         if checks:
             t["cutoff"], t["lufs"] = i.get("cutoff"), i.get("lufs")
+            t["edge"] = i.get("edge")
+            t["short"] = stops_short(i)
         out.append(t)
     return out
 
@@ -305,7 +327,7 @@ def tracks(files, flac=False, checks=True):
 def suspect(item):
     """Flag an album whose FLAC tracks mostly stop short, as a converted MP3's would."""
     cuts = [t["cutoff"] for t in item["flac"]["tracks"] if t.get("cutoff")]
-    low = sorted(c for c in cuts if c < SUSPECT_HZ)
+    low = sorted(t["cutoff"] for t in item["flac"]["tracks"] if stops_short(t))
     item["suspect"] = None
     if cuts and len(low) * 2 > len(cuts):
         mp3 = sorted(t["cutoff"] for t in (item["mp3"] or {}).get("tracks", []) if t.get("cutoff"))
@@ -972,12 +994,12 @@ def health(minutes):
                     continue
                 broken = fm.flac_damaged(files)
                 with ThreadPoolExecutor(3) as ex:
-                    cuts = [e.get("cutoff") for e in ex.map(measure, [p for p in files if p.lower().endswith(".flac")])]
+                    measured = list(ex.map(measure, [p for p in files if p.lower().endswith(".flac")]))
             except OSError as e:                  # moved or binned while we looked
                 log(f"health: skipped {path}: {e}")
                 continue
-        cuts = [c for c in cuts if c]
-        low = sorted(c for c in cuts if c < SUSPECT_HZ)
+        cuts = [e["cutoff"] for e in measured if e.get("cutoff")]
+        low = sorted(e["cutoff"] for e in measured if stops_short(e))
         updates[path] = albums[path] = {"checked": now(), "sig": sig, "tracks": len(files), "damaged": len(broken),
                                         "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None}
         done += 1
@@ -2971,9 +2993,10 @@ def vet(folder):
     flacs = [p for p in files if p.lower().endswith(".flac")]
     broken = fm.flac_damaged(flacs) if flacs else []
     with ThreadPoolExecutor(3) as ex:
-        cuts = [c for c in (e.get("cutoff") for e in ex.map(measure, flacs)) if c]
+        measured = list(ex.map(measure, flacs))
     fm.save_cache()
-    low = sorted(c for c in cuts if c < SUSPECT_HZ)
+    cuts = [e["cutoff"] for e in measured if e.get("cutoff")]
+    low = sorted(e["cutoff"] for e in measured if stops_short(e))
     print(json.dumps({"tracks": len(files), "flac": len(flacs),
                       "damaged": [os.path.basename(b if isinstance(b, str) else b[0]) for b in broken],
                       "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None,

@@ -351,14 +351,21 @@ subprocess.run(noise + [f"{M}/real.flac"], check=True)
 subprocess.run(noise + ["-af", "volume=-6dB", f"{M}/quiet.flac"], check=True)
 subprocess.run(["ffmpeg", "-v", "error", "-i", f"{M}/real.flac", "-b:a", "128k", "-cutoff", "16000", f"{M}/lossy.mp3"], check=True)
 subprocess.run(["ffmpeg", "-v", "error", "-i", f"{M}/lossy.mp3", f"{M}/fake.flac"], check=True)
-real, fake, quiet = (S.measure(f"{M}/{n}.flac") for n in ("real", "fake", "quiet"))
+# a tape-like recording: the same noise fading out gently, over kilohertz, from 6 kHz
+subprocess.run(noise + ["-af", "lowpass=f=6000,lowpass=f=6000,lowpass=f=6000", f"{M}/tape.flac"], check=True)
+real, fake, quiet, tape = (S.measure(f"{M}/{n}.flac") for n in ("real", "fake", "quiet", "tape"))
 check(real["cutoff"] > 21000, f"a genuine FLAC reaches the top ({real['cutoff']} Hz)")
 check(fake["cutoff"] < S.SUSPECT_HZ, f"a FLAC made from an MP3 stops short ({fake['cutoff']} Hz)")
 check(real["lufs"] is not None and abs(real["lufs"] - quiet["lufs"] - 6) < 0.5,
       f"loudness measured ({real['lufs']} and {quiet['lufs']} LUFS)")
 check(S.fm.file_entry(f"{M}/fake.flac")["cutoff"] == fake["cutoff"], "and cached with the file")
+check(S.stops_short(fake), f"an MP3's lowpass is a sharp edge ({fake['edge']})")
+check(S.stops_below(tape["cutoff"]) and not S.stops_short(tape),
+      f"a gentle roll-off is not ({tape['cutoff']} Hz, edge {tape['edge']})")
+e = S.fm.file_entry(f"{M}/fake.flac"); del e["edge"]
+check(S.measure(f"{M}/fake.flac").get("edge") == fake["edge"], "a short track cached before the edge was measured is measured again")
 
-tr = lambda c: {"name": "x", "cutoff": c}
+tr = lambda c, edge=0.5: {"name": "x", "cutoff": c, "edge": edge}
 sus = {"flac": {"tracks": [tr(16000), tr(16100), tr(22050)]}, "mp3": {"tracks": [tr(16000)]},
        "reasons": ["Every track matches"], "_reasons": ["Every track matches"]}
 S.suspect(sus)
@@ -366,6 +373,8 @@ check(sus["suspect"] == {"low": 2, "of": 3, "hz": 16100, "mp3_hz": 16000} and "c
       "an album whose FLAC tracks mostly stop short is flagged")
 ok_album = {"flac": {"tracks": [tr(16000), tr(22050), tr(22050)]}, "mp3": None, "reasons": [], "_reasons": []}
 check(S.suspect(ok_album)["suspect"] is None, "one short track is not enough")
+faded = {"flac": {"tracks": [tr(9000, 0.06), tr(13000, 0.08), tr(16000)]}, "mp3": None, "reasons": [], "_reasons": []}
+check(S.suspect(faded)["suspect"] is None, "tracks that fade out gently are not counted")
 over = {**sus, "id": 40, "queue": "ready", "_status": "retire", "pairs": [{"m": 0, "f": 0, "sim": .9, "same": True}],
         "_files": {"flac": ["a.flac"], "mp3": ["a.mp3"]}}
 check(S.apply_overrides(over, None)["queue"] == "suspect", "a suspect album never lands in Ready")

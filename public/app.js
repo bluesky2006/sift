@@ -632,12 +632,11 @@ function cell(a, side, idx, rowIdx) {
   return `<div class="cell"><button class="play" data-side="${side}" data-idx="${idx}" data-row="${rowIdx}" aria-label="Play the ${side === 'flac' ? 'FLAC' : 'MP3'} of ${esc(t.title || t.name)}">${ic('play')}</button>
     <span class="ttext"><span class="ttitle">${trackNo(a[side].tracks, t)}${esc(t.title || t.name)}</span>
     <span class="tmeta">${clock(t.secs)} · ${esc(t.fmt)}${t.cutoff
-      ? ` · <span class="${side === 'flac' && t.cutoff < SUSPECT_HZ ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
+      ? ` · <span class="${side === 'flac' && t.short ? 'low' : ''}" title="Highest frequency with sound">to ${khz(t.cutoff)}</span>` : ''}${t.lufs != null
       ? ` · <span title="Integrated loudness">${t.lufs.toFixed(1)} LUFS</span>` : ''}</span>${damaged}${(a.dupe || showPaths) && a.paths && a.paths[side][idx]
       ? `<span class="tpath">${esc(a.paths[side][idx])}</span>` : ''}</span></div>`;
 }
 
-const SUSPECT_HZ = 20500;     // bin/sift.py's line: a FLAC track stopping below it is flagged
 let mode = 'view';            // view | pair | order | spectra
 let picked = null;           // MP3 index chosen in pair mode
 let pending = null;          // FLAC order being edited

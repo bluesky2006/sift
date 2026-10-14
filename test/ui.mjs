@@ -53,7 +53,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     { id: 3, artist: 'Faker', title: 'Transcode', queue: 'suspect', reasons: ['Possibly a converted MP3: 1 of 1 FLAC tracks stop around 16.0 kHz'],
       allowed: ['keep_flac', 'keep_mp3', 'refetch', 'watch'], watch: false, suspect: { low: 1, of: 1, hz: 16000, mp3_hz: 16000 },
       source: { user: 'faker99', albums: 2, bad: 2, blocked: false },
-      flac: { tracks: [{ ...t('A', 60), cutoff: 16000 }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
+      flac: { tracks: [{ ...t('A', 60), cutoff: 16000, short: true }], seconds: 60 }, mp3: { tracks: [t('A', 60)], seconds: 60 },
       pairs: [{ m: 0, f: 0, sim: 0.99, same: true }], cover: false, _files: { flac: [], mp3: [] } },
     { id: 4, artist: 'Cband', title: 'Next One', queue: 'different', reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
       refetched: { on: '2026-09-21T12:52:00', checked: true },
