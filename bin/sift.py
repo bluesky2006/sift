@@ -60,6 +60,9 @@ CONF = {
     "damaged": os.path.join(fm.HERE, "flac-damaged.json"),
     # library albums sent back to Soularr from Library health, with the copies they replaced
     "refetched": os.path.join(STATE, "refetched.json"),
+    # Lidarr-FLAC albums Sift has asked to be searched for (refetch, watch, keep-and-find).
+    # soularr_maintenance.py reads this and leaves them monitored, as it does Sleeve's sends
+    "wanted": os.path.join(STATE, "wanted.json"),
     "quarantine": fm.QUARANTINE,                   # where the migration retired MP3s to
     "flac_api": fm.FLAC_API, "flac_config": "/DATA/AppData/lidarr-flac/config/config.xml",
     "mp3_api": "http://localhost:8686/api/v1", "mp3_config": "/DATA/AppData/lidarr/config/config.xml",
@@ -1358,6 +1361,8 @@ class Entry:
                               "before": before})
         self.journal()
         lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
+        if inst == "flac":
+            mark_wanted(album_id, value)
 
     def release(self, album_id, mbid):
         """Make `mbid` the album's selected release in Lidarr-FLAC, which Soularr searches for."""
@@ -1431,6 +1436,8 @@ def undo_ops(ops, failed=None, progress=None):
                 if o["before"] is not None:
                     lidarr(o["inst"], "/album/monitor", "PUT",
                            {"albumIds": [o["album"]], "monitored": o["before"]})
+                    if o["inst"] == "flac":
+                        mark_wanted(o["album"], o["before"])
             elif o["op"] == "ignore_user":
                 if o["added"]:
                     set_ignored(lambda users: [u for u in users if u != o["user"]])
@@ -1958,6 +1965,16 @@ def track_tool(album_id, tool, args):
         refresh_queue()
 
 
+def mark_wanted(album_id, on):
+    """Keep wanted.json in step with what Sift monitors in Lidarr-FLAC."""
+    data = fm.load_json(CONF["wanted"], {})
+    if on:
+        data[str(album_id)] = now()
+    else:
+        data.pop(str(album_id), None)
+    fm.save_json(CONF["wanted"], data)
+
+
 def find_item(album_id):
     for i in fm.load_json(QUEUE, {}).get("items", []):
         if i["id"] == album_id:
@@ -1968,6 +1985,7 @@ def find_item(album_id):
 def watch(item, on):
     """Monitoring only - no files move, so nothing goes in the bin."""
     lidarr("flac", "/album/monitor", "PUT", {"albumIds": [item["id"]], "monitored": on})
+    mark_wanted(item["id"], on)
     k = str(item["id"])
     for which in ("returned", "damaged"):
         data = load_record(CONF[which], {})
@@ -2473,7 +2491,7 @@ def sleeve_claims():
         return set()
     return {e["soulseek"]["folder"] for e in entries
             if isinstance(e.get("soulseek"), dict) and e["soulseek"].get("folder")
-            and e["soulseek"].get("state") != "filed"}
+            and e["soulseek"].get("state") in ("downloading", "stalled")}
 
 
 def scan_downloads():
