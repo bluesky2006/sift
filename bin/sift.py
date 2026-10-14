@@ -2459,15 +2459,33 @@ def keep_dest(item):
     return os.path.join(root, artist, f"{title} ({item['date']})" if item["date"] else title)
 
 
+SLEEVE_ENTRIES = os.path.expanduser("~/.local/state/sleeve/entries.json")
+
+
+def sleeve_claims():
+    """Download folders Sleeve's Send to Soulseek is handling (claimed until it files them).
+    Sleeve files or holds those itself, so Sift neither lists nor touches them. Unreadable
+    means unknown: raise, so nothing in the downloads is offered rather than the wrong thing."""
+    try:
+        with open(SLEEVE_ENTRIES) as f:
+            entries = json.load(f)["entries"]
+    except FileNotFoundError:
+        return set()
+    return {e["soulseek"]["folder"] for e in entries
+            if isinstance(e.get("soulseek"), dict) and e["soulseek"].get("folder")
+            and e["soulseek"].get("state") != "filed"}
+
+
 def scan_downloads():
     """List the download folders and write downloads.json. Nothing moves."""
     root = CONF["downloads_dir"]
     items = []
     if os.path.isdir(root):
         done, busy, failed = transfer_folders()
+        claimed = sleeve_claims()
         for name in sorted(os.listdir(root)):
             folder = os.path.join(root, name)
-            if name in CONF["downloads_skip"] or name.startswith(".") or os.path.islink(folder) or not os.path.isdir(folder):
+            if name in claimed or name in CONF["downloads_skip"] or name.startswith(".") or os.path.islink(folder) or not os.path.isdir(folder):
                 continue
             item = item_from_download(name, folder, fm.folder_audio([folder]), name in busy, done.get(name))
             # files whose last attempt failed and that aren't in the folder anyway
@@ -2487,6 +2505,8 @@ def find_download(item_id):
         if i["id"] == item_id:
             if not os.path.isdir(i["_dir"]):
                 raise SystemExit("that download folder is gone; press Update")
+            if os.path.basename(i["_dir"]) in sleeve_claims():
+                raise SystemExit("Sleeve is handling that download (Send to Soulseek); press Update")
             return i
     raise SystemExit(f"download {item_id} is not listed; press Update")
 
@@ -2892,12 +2912,32 @@ def art(item_id, upload):
 
 
 
+def vet(folder):
+    """The quality checks for one folder, read-only, as JSON on stdout: FLAC files that don't
+    decode whole, and how many stop short of SUSPECT_HZ, judged as suspect() and health() judge.
+    Sleeve runs this on a Send to Soulseek download before filing it, so the two apps share
+    one set of rules."""
+    files = fm.folder_audio([folder])
+    flacs = [p for p in files if p.lower().endswith(".flac")]
+    broken = fm.flac_damaged(flacs) if flacs else []
+    with ThreadPoolExecutor(3) as ex:
+        cuts = [c for c in (e.get("cutoff") for e in ex.map(measure, flacs)) if c]
+    fm.save_cache()
+    low = sorted(c for c in cuts if c < SUSPECT_HZ)
+    print(json.dumps({"tracks": len(files), "flac": len(flacs),
+                      "damaged": [os.path.basename(b if isinstance(b, str) else b[0]) for b in broken],
+                      "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None,
+                      "suspect": bool(cuts) and len(low) * 2 > len(cuts)}))
+
+
 def main():
     os.makedirs(STATE, exist_ok=True)
     a = sys.argv[1:]
     try:
         if a == ["check"]:
             check()
+        elif len(a) == 2 and a[0] == "vet" and os.path.isdir(a[1]):
+            vet(a[1])
         elif len(a) == 3 and a[0] == "resolve":
             resolve(int(a[1]), a[2])
         elif len(a) == 4 and a[0] == "resolve" and a[3].isdigit():
