@@ -1197,16 +1197,16 @@ m.save()
 os.makedirs(f"{MUSIC}/FLAC/space afrika", exist_ok=True)
 S.lidarr = lambda inst, path, method="GET", body=None: [] if path.startswith("/album/lookup") else fake_lidarr(inst, path, method, body)
 nobody = {i["name"]: i for i in S.scan_downloads()}["Nobody"]
-check(nobody["allowed"] == ["keep", "bin"] and nobody["keep"] == "FLAC/space afrika/Quiet_ Storm (2026)"
+check(nobody["allowed"] == ["keep", "bin"] and nobody["keep"] == "FLAC/space afrika/Quiet_ Storm"
       and "keep it as is" in nobody["blocked"], "a FLAC folder nobody can place offers Keep as is, under the existing artist folder")
 check(unknown["keep"] is None, "an album MusicBrainz can add doesn't offer Keep")
 S.download(nobody["id"], "keep")
 entry = load(f"{STATE}/bin.json")["entries"][-1]
 check(entry["decision"] == "keep_download" and not os.path.exists(f"{DL}/Nobody")
-      and os.path.isfile(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm (2026)/01.flac"), "Keep as is moves the folder into the FLAC library")
+      and os.path.isfile(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm/01.flac"), "Keep as is moves the folder into the FLAC library")
 S.lidarr = real_lidarr
 r = sift("undo", entry["id"])
-check(r.returncode == 0 and os.path.isfile(f"{DL}/Nobody/01.flac") and not os.path.exists(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm (2026)"),
+check(r.returncode == 0 and os.path.isfile(f"{DL}/Nobody/01.flac") and not os.path.exists(f"{MUSIC}/FLAC/space afrika/Quiet_ Storm"),
       "and Undo puts it back in the downloads")
 
 # an MP3 folder: Keep as is, or keep it and have Soularr look for a FLAC
@@ -1264,7 +1264,7 @@ part = {i["name"]: i for i in S.scan_downloads()}["Part"]
 check(part["failed"] == ["02.mp3"], "a file whose last attempt failed, and isn't in the folder, is listed as never arrived")
 check("05.flac" not in part["failed"] and "06.flac" not in part["failed"],
       "an abandoned attempt from a user who sent nothing, or the same track in another format, isn't missing")
-check(part["allowed"] == ["keep", "keep_find", "bin"] and part["keep"] == "MP3/Fohn/Porcelain (2026)", "an MP3 folder offers Keep as is, into the MP3 library")
+check(part["allowed"] == ["keep", "keep_find", "bin"] and part["keep"] == "MP3/Fohn/Porcelain", "an MP3 folder offers Keep as is, into the MP3 library")
 S.CONF["transfers_db"] = dconf["transfers_db"]
 shutil.rmtree(f"{DL}/Part")
 
@@ -1323,8 +1323,8 @@ check("error" in sleeve_file(f"{DL}/Mp3Keep", "A", "B", "2020") if os.path.isdir
       "sleeve-file refuses a folder Sleeve hasn't claimed")
 r = sleeve_file(f"{DL}/Sleeve Grab", "Space Afrika", "Honest: Labour", "2021-05-01")
 artist_dir = next(d for d in os.listdir(f"{MUSIC}/FLAC") if d.casefold() == "space afrika")
-check(r.get("dest") == f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour (2021)" and os.path.isfile(r["dest"] + "/01.flac")
-      and not os.path.exists(f"{DL}/Sleeve Grab"), "sleeve-file files it Artist/Album (Year), under the existing artist folder, as Keep as is would")
+check(r.get("dest") == f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour" and os.path.isfile(r["dest"] + "/01.flac")
+      and not os.path.exists(f"{DL}/Sleeve Grab"), "sleeve-file files it Artist/Album, no year, under the existing artist folder, as Keep as is would")
 entry = load(f"{STATE}/bin.json")["entries"][-1]
 check(entry["decision"] == "sleeve_file", "and records it in the bin")
 os.makedirs(f"{DL}/Sleeve Grab", exist_ok=True)
@@ -1334,7 +1334,7 @@ check("already there" in sleeve_file(f"{DL}/Sleeve Grab", "Space Afrika", "Hones
 shutil.rmtree(f"{DL}/Sleeve Grab")
 S.lidarr = real_lidarr
 r = sift("undo", entry["id"])
-check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour (2021)") and os.path.isfile(f"{DL}/Sleeve Grab/01.flac"), "and Undo takes it out of the library, back to the downloads")
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour") and os.path.isfile(f"{DL}/Sleeve Grab/01.flac"), "and Undo takes it out of the library, back to the downloads")
 S.SLEEVE_ENTRIES = "/nonexistent/entries.json"
 
 shutil.rmtree(T)

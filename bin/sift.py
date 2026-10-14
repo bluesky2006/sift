@@ -2455,7 +2455,7 @@ def item_from_download(name, folder, files, busy, source):
 
 
 def keep_dest(item):
-    """Where Keep as is files a download, as Artist/Album (Year) named from its tags: an MP3
+    """Where Keep as is files a download, as Artist/Album named from its tags: an MP3
     folder into the MP3 library, a FLAC one nobody can place (Lidarr doesn't know it and
     MusicBrainz has nothing to add) into the Roon FLAC library. None when Keep isn't on offer."""
     v = item.get("lidarr")
@@ -2471,18 +2471,18 @@ def keep_dest(item):
 
 
 def library_name(root, artist, title, date):
-    """Artist/Album (Year) under `root`: the one naming rule for anything filed by tags, by
-    Keep as is here and by Sleeve's Send to Soulseek (sleeve-file). None if a name is empty."""
+    """Artist/Album under `root`, no year (Simon's choice, 14 Oct 2026): the one naming rule for
+    anything filed by tags, by Keep as is here and by Sleeve's Send to Soulseek (sleeve-file).
+    `date` is accepted and ignored. None if a name is empty."""
     clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "").strip(" .")[:120]
     artist, title = clean(artist), clean(title)
-    year = (re.search(r"\d{4}", date or "") or [None])[0]
     if not artist or not title:
         return None
     try:   # merge "XEXA" into an existing "Xexa", as the migration does
         artist = next((d for d in os.listdir(root) if d.casefold() == artist.casefold()), artist)
     except OSError:
         pass
-    return os.path.join(root, artist, f"{title} ({year})" if year else title)
+    return os.path.join(root, artist, title)
 
 
 SLEEVE_ENTRIES = os.environ.get("SIFT_SLEEVE_ENTRIES") or os.path.expanduser("~/.local/state/sleeve/entries.json")
@@ -2932,7 +2932,7 @@ def art(item_id, upload):
 
 def sleeve_file(folder, artist, title, date):
     """File one of Sleeve's Send to Soulseek downloads, which Sleeve has already matched to the
-    record and vetted: into the FLAC or MP3 library by library_name(), as one bin entry, so
+    record and vetted: into the FLAC or MP3 library as Artist/Album (library_name()), as one bin entry, so
     Undo puts the folder back in the downloads. Only a folder Sleeve has claimed, directly in
     the downloads folder, is accepted. Prints {"dest": ...} or {"error": ...}."""
     folder = os.path.realpath(folder)
