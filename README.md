@@ -30,7 +30,10 @@ The one move Sift doesn't make itself is a download's import, which Lidarr does;
 in the bin all the same.
 
 `sift.py vet <folder>` runs the quality checks (`flac -t`, the spectrum cut-off) on one folder, read-only,
-and prints JSON. Sleeve runs it on a Send to Soulseek download before filing it.
+and prints JSON. Sleeve runs it on a Send to Soulseek download before filing it, then `sift.py sleeve-file <folder> <artist> <album> <year>`
+files it by the same naming rule as Keep as is, as a bin entry ("Filed for Sleeve") that Undo reverses. It only accepts
+a folder Sleeve has claimed. The albums Sift asks Lidarr-FLAC to search for are listed in `wanted.json`, which
+`soularr_maintenance.py` reads so it doesn't unmonitor them.
 
 ## Pieces
 

@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.expanduser("~/claude-roon"))
 import flac_migrate as fm
+import sleeve_state
 import mutagen, mutagen.flac, mutagen.id3
 
 STATE = os.environ.get("SIFT_STATE", os.path.expanduser("~/.local/state/sift"))
@@ -2466,32 +2467,31 @@ def keep_dest(item):
         root = CONF["flac_dest"]
     else:
         return None
-    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x).strip(" .")[:120]
-    artist, title = clean(item["artist"]), clean(item["title"])
+    return library_name(root, item["artist"], item["title"], item["date"])
+
+
+def library_name(root, artist, title, date):
+    """Artist/Album (Year) under `root`: the one naming rule for anything filed by tags, by
+    Keep as is here and by Sleeve's Send to Soulseek (sleeve-file). None if a name is empty."""
+    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "").strip(" .")[:120]
+    artist, title = clean(artist), clean(title)
+    year = (re.search(r"\d{4}", date or "") or [None])[0]
     if not artist or not title:
         return None
     try:   # merge "XEXA" into an existing "Xexa", as the migration does
         artist = next((d for d in os.listdir(root) if d.casefold() == artist.casefold()), artist)
     except OSError:
         pass
-    return os.path.join(root, artist, f"{title} ({item['date']})" if item["date"] else title)
+    return os.path.join(root, artist, f"{title} ({year})" if year else title)
 
 
-SLEEVE_ENTRIES = os.path.expanduser("~/.local/state/sleeve/entries.json")
+SLEEVE_ENTRIES = os.environ.get("SIFT_SLEEVE_ENTRIES") or os.path.expanduser("~/.local/state/sleeve/entries.json")
 
 
 def sleeve_claims():
-    """Download folders Sleeve's Send to Soulseek is handling (claimed until it files them).
-    Sleeve files or holds those itself, so Sift neither lists nor touches them. Unreadable
-    means unknown: raise, so nothing in the downloads is offered rather than the wrong thing."""
-    try:
-        with open(SLEEVE_ENTRIES) as f:
-            entries = json.load(f)["entries"]
-    except FileNotFoundError:
-        return set()
-    return {e["soulseek"]["folder"] for e in entries
-            if isinstance(e.get("soulseek"), dict) and e["soulseek"].get("folder")
-            and e["soulseek"].get("state") in ("downloading", "stalled")}
+    """Download folders Sleeve's Send to Soulseek is handling: Sift neither lists nor touches
+    them, except to file one when Sleeve asks (sleeve-file). See ~/claude-roon/sleeve_state.py."""
+    return sleeve_state.claims(SLEEVE_ENTRIES)
 
 
 def scan_downloads():
@@ -2930,6 +2930,38 @@ def art(item_id, upload):
 
 
 
+def sleeve_file(folder, artist, title, date):
+    """File one of Sleeve's Send to Soulseek downloads, which Sleeve has already matched to the
+    record and vetted: into the FLAC or MP3 library by library_name(), as one bin entry, so
+    Undo puts the folder back in the downloads. Only a folder Sleeve has claimed, directly in
+    the downloads folder, is accepted. Prints {"dest": ...} or {"error": ...}."""
+    folder = os.path.realpath(folder)
+    name = os.path.basename(folder)
+    try:
+        if os.path.dirname(folder) != os.path.realpath(CONF["downloads_dir"]) or name not in sleeve_claims():
+            raise RuntimeError("not a download Sleeve has claimed")
+        files = fm.folder_audio([folder])
+        if not files:
+            raise RuntimeError("no audio in it")
+        flac = all(f.lower().endswith(".flac") for f in files)
+        root = CONF["flac_dest"] if flac else CONF["mp3_root"]
+        if CONF.get("check_mounts", True) and not os.path.ismount(os.path.dirname(root)):
+            raise RuntimeError(f"{os.path.dirname(root)} isn't mounted")
+        dest = library_name(root, artist, title, date)
+        if not dest:
+            raise RuntimeError("no artist or album to name it by")
+        with Lock():
+            if os.path.exists(dest):
+                raise RuntimeError(f"{dest} is already there, so nothing was overwritten")
+            en = Entry("sleeve_file", {"id": download_id(name), "artist": artist, "title": title})
+            en.move(folder, dest)
+            save_entry(en.d)
+        log(f"filed for Sleeve: {name} -> {dest}")
+        print(json.dumps({"dest": dest}))
+    except (RuntimeError, OSError) as e:
+        print(json.dumps({"error": str(e)}))
+
+
 def vet(folder):
     """The quality checks for one folder, read-only, as JSON on stdout: FLAC files that don't
     decode whole, and how many stop short of SUSPECT_HZ, judged as suspect() and health() judge.
@@ -2954,6 +2986,8 @@ def main():
     try:
         if a == ["check"]:
             check()
+        elif len(a) == 5 and a[0] == "sleeve-file" and os.path.isdir(a[1]):
+            sleeve_file(*a[1:])
         elif len(a) == 2 and a[0] == "vet" and os.path.isdir(a[1]):
             vet(a[1])
         elif len(a) == 3 and a[0] == "resolve":

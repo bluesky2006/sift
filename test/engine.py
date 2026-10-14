@@ -1304,6 +1304,39 @@ check(len(apic) == 1 and apic[0].mime == "image/jpeg" and os.path.isfile(f"{DL}/
 r = sift("art", "77", "/etc/hostname", ok=False)
 check(r.returncode != 0 and "the app saved" in r.stdout + r.stderr, "a picture from anywhere but the app's uploads folder is refused")
 
+# Sleeve's Send to Soulseek: its claimed folders are neither listed nor touched, and
+# sleeve-file files one by the shared naming rule, as an undoable bin entry
+claims = f"{T}/sleeve-entries.json"
+S.SLEEVE_ENTRIES = claims
+os.makedirs(f"{DL}/Sleeve Grab", exist_ok=True)
+tone(f"{DL}/Sleeve Grab/01.flac", "flac")
+json.dump({"entries": [{"kind": "want", "soulseek": {"folder": "Sleeve Grab", "state": "downloading"}}]}, open(claims, "w"))
+S.lidarr = lambda inst, path, method="GET", body=None: [] if path.startswith("/album/lookup") else fake_lidarr(inst, path, method, body)
+check("Sleeve Grab" not in {i["name"] for i in S.scan_downloads()}, "a folder Sleeve has claimed isn't listed in Downloads")
+import io, contextlib
+def sleeve_file(*a):
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        S.sleeve_file(*a)
+    return json.loads(out.getvalue().strip().splitlines()[-1])
+check("error" in sleeve_file(f"{DL}/Mp3Keep", "A", "B", "2020") if os.path.isdir(f"{DL}/Mp3Keep") else True,
+      "sleeve-file refuses a folder Sleeve hasn't claimed")
+r = sleeve_file(f"{DL}/Sleeve Grab", "Space Afrika", "Honest: Labour", "2021-05-01")
+artist_dir = next(d for d in os.listdir(f"{MUSIC}/FLAC") if d.casefold() == "space afrika")
+check(r.get("dest") == f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour (2021)" and os.path.isfile(r["dest"] + "/01.flac")
+      and not os.path.exists(f"{DL}/Sleeve Grab"), "sleeve-file files it Artist/Album (Year), under the existing artist folder, as Keep as is would")
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(entry["decision"] == "sleeve_file", "and records it in the bin")
+os.makedirs(f"{DL}/Sleeve Grab", exist_ok=True)
+tone(f"{DL}/Sleeve Grab/01.flac", "flac")
+check("already there" in sleeve_file(f"{DL}/Sleeve Grab", "Space Afrika", "Honest: Labour", "2021").get("error", ""),
+      "an existing destination is refused, never overwritten")
+shutil.rmtree(f"{DL}/Sleeve Grab")
+S.lidarr = real_lidarr
+r = sift("undo", entry["id"])
+check(r.returncode == 0 and not os.path.exists(f"{MUSIC}/FLAC/{artist_dir}/Honest_ Labour (2021)") and os.path.isfile(f"{DL}/Sleeve Grab/01.flac"), "and Undo takes it out of the library, back to the downloads")
+S.SLEEVE_ENTRIES = "/nonexistent/entries.json"
+
 shutil.rmtree(T)
 print(f"\n{'all passed' if not failures else f'{failures} FAILED'}")
 sys.exit(1 if failures else 0)
