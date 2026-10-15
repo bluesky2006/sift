@@ -1172,7 +1172,7 @@ check(len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1 and entry["de
       and entry["ops"][0] == {"op": "import", "inst": "flac", "album": 50, "files": 2, "folder": "Fresh Album", "command": 7}
       and not os.path.exists(f"{DL}/Fresh Album") and os.path.isfile(f"{T}/slskd/Sift-bin/{entry['id']}/downloads/Fresh Album/cover.txt"),
       "the import is recorded in the bin, and what Lidarr left in the folder goes there too")
-check(os.path.isfile(f"{DATA}/music-flac/Art/Fresh/cover.jpg") and entry["ops"][-1] == {"op": "cover", "file": f"{DATA}/music-flac/Art/Fresh/cover.jpg"}
+check(os.path.isfile(f"{DATA}/music-flac/Art/Fresh/cover.jpg") and entry["ops"][-1]["op"] == "wrote" and entry["ops"][-1]["file"] == f"{DATA}/music-flac/Art/Fresh/cover.jpg"
       and fetched[0].endswith("/MediaCover/Albums/50/cover.jpg") and len(fetched) == 1,
       "a cover from Lidarr's picture of the album lands beside the imported files, and is recorded")
 S.fetch_bytes = lambda url, headers=None: fetched.append(url) or None
@@ -1369,6 +1369,43 @@ json.dump(disk, open(cache_file, "w"))
 S.fm.cache()["files"][p0].pop("edge", None)
 S.fm.save_cache()
 check(load(cache_file)["files"][p0].get("edge") == 0.99, "saving the cache never takes back what another process measured")
+
+print("wanted.json, fetch-cover, names and pictures")
+json.dump({"900": "2026-01-01T00:00:00"}, open(S.CONF["wanted"], "w"))
+S.lidarr = lambda inst, path, method="GET", body=None: {"monitored": True} if method == "GET" else {}
+en = S.Entry("x", {"id": 900, "artist": "A", "title": "T"})
+en.monitor("flac", 900, False); en.monitor("flac", 901, False)      # 901 monitored outside Sift
+check("900" not in load(S.CONF["wanted"]), "unmonitoring takes it out of wanted.json")
+S.undo_ops(en.d["ops"], [])
+S.drop_journal(en.d)
+check(load(S.CONF["wanted"]) == {"900": "2026-01-01T00:00:00"},
+      "Undo puts wanted.json back exactly: the old timestamp, and nothing Sift never asked for")
+S.lidarr = fake_lidarr
+for n in os.listdir(f"{DATA}/music-flac/Art/Fresh"):
+    if n.endswith(".jpg"):
+        os.remove(f"{DATA}/music-flac/Art/Fresh/{n}")
+S.fetch_bytes = lambda url, headers=None: b"\xff\xd8not really a jpeg"
+bins_before = len(load(f"{STATE}/bin.json")["entries"])
+out = S.fetch_cover_cli("flac", 50)
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(out and os.path.isfile(out) and len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1
+      and entry["ops"] == [{"op": "wrote", "file": out, "sha": S.file_sha(out)}], "fetch-cover is recorded in the bin")
+open(out, "wb").write(b"my own scan")
+r = sift("undo", entry["id"])
+check(r.returncode == 0 and open(out, "rb").read() == b"my own scan", "Undo leaves a cover.jpg replaced by hand since")
+os.remove(out)
+check(S.fetch_cover_cli("flac", 50) and len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1, "and is redone after")
+r = sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+check(r.returncode == 0 and not os.path.exists(out), "while one Sift wrote and nobody touched is removed")
+name = S.library_name(T, "A", "x" * 119 + " .tail", None)
+check(name == os.path.join(T, "A", "x" * 119), "a long name is cut before it is trimmed, so it never ends in a space or a dot")
+Image.new("1", (8000, 6000)).save(f"{T}/huge.png")
+try:
+    S.art_bytes(f"{T}/huge.png")
+    huge = None
+except RuntimeError as e:
+    huge = str(e)
+check(huge and "too many pixels" in huge, "a picture of too many pixels is refused before it is decoded")
 
 # Sleeve's Send to Soulseek: its claimed folders are neither listed nor touched, and
 # sleeve-file files one by the shared naming rule, as an undoable bin entry

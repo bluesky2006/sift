@@ -12,7 +12,8 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const T = fs.mkdtempSync(path.join(os.tmpdir(), 'sift-srv-'));
 const STATE = path.join(T, 'state');
 const MUSIC = path.join(T, 'music');
-const PORT = 18305;
+// a free port, so two runs at once don't collide
+const PORT = await new Promise((ok) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
 fs.mkdirSync(STATE, { recursive: true });
 fs.mkdirSync(path.join(MUSIC, 'Art/Alb'), { recursive: true });
 fs.writeFileSync(path.join(MUSIC, 'Art/Alb/01.flac'), Buffer.alloc(10000, 7));
@@ -50,7 +51,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
 }));
 fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: new Date().toISOString(), items: [{
   id: 700000001, name: 'Fresh', artist: 'Someone', title: 'Found It', kind: 'flac', inst: 'flac', busy: false, cover: false,
-  blocked: 'Lidarr-FLAC advises against it: Has missing tracks', allowed: ['import_anyway', 'release', 'bin'], force_ok: true, damaged: 0,
+  blocked: 'Lidarr-FLAC advises against it: Has missing tracks', allowed: ['import_anyway', 'release', 'bin', 'keep', 'keep_find'], force_ok: true, damaged: 0,
   tracks: [{ name: '01.flac', secs: 3, fmt: '16-bit / 44.1 kHz' }, { name: 'x' }], seconds: 3, bytes: 10000, first_seen: '2026-09-29T14:00:00',
   source: { user: 'seeder', when: '2026-09-29T13:00:00' }, add: null, releases: [{ release: 'r-a', title: 'A', tracks: 1, selected: true }, { release: 'r-b', title: 'B', tracks: 2, selected: false }],
   lidarr: { error: null, artist: 'Someone', title: 'Found It', album_id: 9, artist_id: 3, albums: 1, unmapped: 0, rejections: ['Has missing tracks'],
@@ -318,6 +319,13 @@ try {
     'Import anyway runs with the password');
   await new Promise((res) => setTimeout(res, 1500));
   check(lastCall().endsWith('download 700000001 import-anyway'), 'as download ID import-anyway');
+  for (const [action, word] of [['keep', 'keep'], ['keep_find', 'keep-find']]) {
+    const r = await req('/api/download', { method: 'POST', body: { id: 700000001, action }, csrf });
+    const body = await r.text();
+    await new Promise((res) => setTimeout(res, 1500));
+    check(r.status === 202 && lastCall().endsWith(`download 700000001 ${word}`) && !body.includes(MUSIC) && !body.includes('/secret'),
+      `${action} runs as download ID ${word}, and its reply holds no path`);
+  }
 
   console.log('artwork');
   await new Promise((res) => setTimeout(res, 1500));

@@ -1299,7 +1299,7 @@ $('seek').onchange = () => { active.currentTime = Number($('seek').value); seeki
 
 const DECIDED = { keep_flac: 'Kept FLAC', keep_mp3: 'Kept MP3', refetch: 'Getting a better FLAC', bin_album: 'Album put in the bin',
   check: 'Check for new arrivals', adopted: 'Added from the shell', bin_track: 'Track put in the bin', reorder: 'FLAC tracks renumbered', block_user: 'Soulseek user blocked',
-  strip_id3: 'ID3v1 tags cut off', art: 'Artwork written into the files', bin_download: 'Download put in the bin', import_download: 'Download imported by Lidarr (the folder left behind)', sleeve_file: 'Filed for Sleeve (Send to Soulseek)' };
+  strip_id3: 'ID3v1 tags cut off', art: 'Artwork written into the files', bin_download: 'Download put in the bin', import_download: 'Download imported by Lidarr (the folder left behind)', sleeve_file: 'Filed for Sleeve (Send to Soulseek)', cover: 'Cover fetched from the shell' };
 
 function renderBin() {
   document.title = 'Bin · Sift';

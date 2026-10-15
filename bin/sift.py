@@ -1400,8 +1400,10 @@ class Entry:
         # recorded before the change is made, as moves are: a PUT that times out may still
         # have landed, and putting back a value that never changed is harmless
         before = lidarr(inst, f"/album/{album_id}").get("monitored")
-        self.d["ops"].append({"op": "monitor", "inst": inst, "album": album_id,
-                              "before": before})
+        op = {"op": "monitor", "inst": inst, "album": album_id, "before": before}
+        if inst == "flac":                    # wanted.json as it was, put back exactly on Undo
+            op["wanted_before"] = fm.load_json(CONF["wanted"], {}).get(str(album_id))
+        self.d["ops"].append(op)
         self.journal()
         lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
         if inst == "flac":
@@ -1480,7 +1482,8 @@ def undo_ops(ops, failed=None, progress=None):
                     lidarr(o["inst"], "/album/monitor", "PUT",
                            {"albumIds": [o["album"]], "monitored": o["before"]})
                     if o["inst"] == "flac":
-                        mark_wanted(o["album"], o["before"])
+                        # entries from before wanted_before was recorded: as monitoring
+                        mark_wanted(o["album"], o["wanted_before"] if "wanted_before" in o else o["before"])
             elif o["op"] == "ignore_user":
                 if o["added"]:
                     set_ignored(lambda users: [u for u in users if u != o["user"]])
@@ -1498,8 +1501,12 @@ def undo_ops(ops, failed=None, progress=None):
                 for f in o["files"]:
                     restore_art(f)
             elif o["op"] == "wrote":
-                if os.path.isfile(o["file"]):      # a file Sift itself wrote, so removing it is the undo
+                # a file Sift itself wrote, so removing it is the undo - unless it has been
+                # replaced since, by hand: then it is someone's own file, and stays
+                if os.path.isfile(o["file"]) and o.get("sha") in (None, file_sha(o["file"])):
                     os.remove(o["file"])
+                elif os.path.isfile(o["file"]):
+                    log(f"left in place, changed since Sift wrote it: {o['file']}")
             elif o["op"] == "ledger":
                 data = load_record(CONF[o["file"]], {})
                 if o["before"] is None:
@@ -1555,6 +1562,11 @@ def save_entry(entry):
     b["entries"].append(entry)
     save_record(BIN, b)
     drop_journal(entry)
+
+
+def file_sha(path):
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 def drop_journal(entry):
@@ -2009,9 +2021,12 @@ def track_tool(album_id, tool, args):
 
 
 def mark_wanted(album_id, on):
-    """Keep wanted.json in step with what Sift monitors in Lidarr-FLAC."""
+    """Keep wanted.json in step with what Sift monitors in Lidarr-FLAC. `on` may be the
+    exact value to put back (a timestamp, or None to remove), as Undo does."""
     data = fm.load_json(CONF["wanted"], {})
-    if on:
+    if isinstance(on, str):
+        data[str(album_id)] = on
+    elif on:
         data[str(album_id)] = now()
     else:
         data.pop(str(album_id), None)
@@ -2516,7 +2531,8 @@ def library_name(root, artist, title, date):
     """Artist/Album under `root`, no year (Simon's choice, 14 Oct 2026): the one naming rule for
     anything filed by tags, by Keep as is here and by Sleeve's Send to Soulseek (sleeve-file).
     `date` is accepted and ignored. None if a name is empty."""
-    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "").strip(" .")[:120]
+    # cut before trimming, so a long name never ends in "." or " ", which NTFS won't take
+    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "")[:120].strip(" .")
     artist, title = clean(artist), clean(title)
     if not artist or not title:
         return None
@@ -2626,6 +2642,18 @@ def fetch_cover(inst, album_id):
     return out
 
 
+def fetch_cover_cli(inst, album_id):
+    """fetch-cover from the shell: under the lock, and recorded in the bin like any write."""
+    with Lock():
+        out = fetch_cover(inst, album_id)
+        if out:
+            en = Entry("cover", {"id": album_id, "artist": f"Lidarr{'-FLAC' if inst == 'flac' else ''} album {album_id}",
+                                 "title": "cover.jpg"})
+            en.d["ops"].append({"op": "wrote", "file": out, "sha": file_sha(out)})
+            save_entry(en.d)
+    return out
+
+
 def download_import(item, force=False):
     """One ManualImport for the whole folder, importMode move, checked again first."""
     inst, name, folder, files = item["inst"], item["name"], item["_dir"], item["_files"]
@@ -2670,7 +2698,7 @@ def download_import(item, force=False):
     try:
         cover_file = fetch_cover(inst, fresh["lidarr"]["album_id"])
         if cover_file:
-            en.d["ops"].append({"op": "cover", "file": cover_file})
+            en.d["ops"].append({"op": "wrote", "file": cover_file, "sha": file_sha(cover_file)})
     except Exception as e:
         log(f"WARNING: no cover fetched for {label} ({e})")
     save_entry(en.d)
@@ -2816,6 +2844,7 @@ def download(item_id, action, arg=None):
 
 UPLOADS = os.path.join(STATE, "uploads")       # the web app saves each dropped picture here
 ART_PX = 1500
+ART_MAX_PIXELS = 40_000_000   # a 12 MB PNG can hold ~170 million, about 0.5 GB decoded
 
 
 def art_bytes(path):
@@ -2826,6 +2855,8 @@ def art_bytes(path):
     with Image.open(path) as im:
         if im.format not in ("JPEG", "PNG"):
             raise RuntimeError(f"not a JPEG or PNG ({im.format})")
+        if im.width * im.height > ART_MAX_PIXELS:       # read from the header, before decoding
+            raise RuntimeError(f"too many pixels ({im.width} x {im.height})")
         im = im.convert("RGB")
         im.thumbnail((ART_PX, ART_PX))
         out = io.BytesIO()
@@ -2952,7 +2983,7 @@ def set_art(item, upload):
             out = os.path.join(d, "cover.jpg")
             with open(out, "wb") as f:
                 f.write(data)
-            en.d["ops"].append({"op": "wrote", "file": out})
+            en.d["ops"].append({"op": "wrote", "file": out, "sha": hashlib.sha256(data).hexdigest()})
             en.journal()
     except Exception as e:
         failed = []
@@ -3088,7 +3119,7 @@ def main():
         elif len(a) == 3 and a[0] == "art" and a[1].isdigit():
             art(int(a[1]), a[2])
         elif len(a) == 3 and a[0] == "fetch-cover" and a[1] in ("flac", "mp3") and a[2].isdigit():
-            print(fetch_cover(a[1], int(a[2])) or "no cover found, or the folder already has one")
+            print(fetch_cover_cli(a[1], int(a[2])) or "no cover found, or the folder already has one")
         elif len(a) in (3, 4) and a[0] == "download" and a[1].isdigit() \
                 and a[2] in ("import", "import-anyway", "add", "release", "keep", "keep-find", "bin") \
                 and (len(a) == 3) == (a[2] != "release") and (len(a) == 3 or a[3].isdigit()):

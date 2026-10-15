@@ -14,7 +14,8 @@ const { chromium } = await import(process.env.PLAYWRIGHT_CORE
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const T = fs.mkdtempSync(path.join(os.tmpdir(), 'sift-ui-'));
 const STATE = path.join(T, 'state');
-const PORT = 18395;
+// a free port, so two runs at once don't collide
+const PORT = await new Promise((ok) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
 const BASE = `http://127.0.0.1:${PORT}`;
 fs.mkdirSync(STATE, { recursive: true });
 const stub = path.join(T, 'engine.sh');
