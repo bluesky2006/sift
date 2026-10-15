@@ -51,6 +51,7 @@ CONF = {
              "/mnt/roon-data": "/mnt/roon-data/Sift-bin",
              "/DATA/AppData/slskd": "/DATA/AppData/slskd/Sift-bin"},
     "plain_bins": ["/DATA/AppData/slskd"],        # on the root disk, so no mount to check
+    "ntfs_bins": ["/mnt/roon-data"],              # ntfs-3g: deleted-but-open files linger as .fuse_hidden*
     # slskd's downloads folder, and the same folder as each Lidarr container sees it (None
     # when that Lidarr has no mount for it). _keep is Simon's own and is never listed.
     "downloads_dir": "/DATA/AppData/slskd/downloads",
@@ -104,6 +105,7 @@ SUSPECT_HZ = 20500
 # 0.1-0.6 kHz below the cutoff over the strength 2-4 kHz below it. Measured on 14 Oct 2026:
 # LAME 128/192/320/V0 transcodes 0.19-0.72; ambient and tape albums Simon kept 0.05-0.09.
 SHARP_EDGE = 0.15
+HEALTH_RULE = [SUSPECT_HZ, SHARP_EDGE]   # a health record made under another rule is checked again
 MEASURE_SECONDS = 60       # the spectrum is taken over this much from the middle of a track
 
 
@@ -268,18 +270,19 @@ def measure(path):
             return e                              # killed or failed: not cached, measured again next time
         err = r.stderr.decode("utf-8", "replace")
         rate = re.search(r"Audio: .*?, (\d+) Hz", err)
-        if len(r.stdout) == w * h and rate:
-            # rows run from the top of the spectrum down; a row counts once its mean
-            # brightness is off the floor, which a genuine recording's noise always is
-            rows = [sum(r.stdout[y * w:(y + 1) * w]) / w for y in range(h)]
-            if max(rows) >= 20:                      # not silence
-                top = next(y for y, v in enumerate(rows) if v >= 1)
-                per = int(rate.group(1)) / 2 / h          # Hz per row
-                cutoff = round((h - top) * per)
-                near = rows[top + math.ceil(90 / per):top + math.ceil(600 / per)]
-                ref = sorted(rows[top + round(2000 / per):top + round(4000 / per)])
-                if near and ref and ref[len(ref) // 2] > 0:
-                    edge = round(sum(near) / len(near) / ref[len(ref) // 2], 2)
+        if len(r.stdout) != w * h or not rate:
+            return e                              # unreadable output: not cached, measured again next time
+        # rows run from the top of the spectrum down; a row counts once its mean
+        # brightness is off the floor, which a genuine recording's noise always is
+        rows = [sum(r.stdout[y * w:(y + 1) * w]) / w for y in range(h)]
+        if max(rows) >= 20:                      # not silence
+            top = next(y for y, v in enumerate(rows) if v >= 1)
+            per = int(rate.group(1)) / 2 / h          # Hz per row
+            cutoff = round((h - top) * per)
+            near = rows[top + math.ceil(90 / per):top + math.ceil(600 / per)]
+            ref = sorted(rows[top + round(2000 / per):top + round(4000 / per)])
+            if near and ref and ref[len(ref) // 2] > 0:
+                edge = round(sum(near) / len(near) / ref[len(ref) // 2], 2)
         found = re.findall(r"I:\s+(-?[\d.]+) LUFS", err)
         if found and float(found[-1]) > -70:
             lufs = float(found[-1])
@@ -975,7 +978,8 @@ def health(minutes):
         raise RuntimeError(f"refusing: {CONF['flac_dest']} has no albums in it")
     updates = {path: None for path in albums if path not in folders}
     # never-checked folders first, then the longest ago
-    folders.sort(key=lambda p: (p in albums, albums.get(p, {}).get("checked", "")))
+    current = lambda p: p in albums and albums[p].get("rule") == HEALTH_RULE
+    folders.sort(key=lambda p: (current(p), albums.get(p, {}).get("checked", "")))
     done = 0
     for path in folders:
         if time.time() > stop:
@@ -990,7 +994,7 @@ def health(minutes):
                 # tracks, or it would come first every night as never checked
                 files = fm.folder_audio([path])
                 sig = folder_sig(files)
-                if albums.get(path, {}).get("sig") == sig:
+                if albums.get(path, {}).get("sig") == sig and current(path):
                     continue
                 broken = fm.flac_damaged(files)
                 with ThreadPoolExecutor(3) as ex:
@@ -1001,13 +1005,14 @@ def health(minutes):
         cuts = [e["cutoff"] for e in measured if e.get("cutoff")]
         low = sorted(e["cutoff"] for e in measured if stops_short(e))
         updates[path] = albums[path] = {"checked": now(), "sig": sig, "tracks": len(files), "damaged": len(broken),
-                                        "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None}
+                                        "low": len(low), "of": len(cuts), "hz": low[len(low) // 2] if low else None,
+                                        "rule": HEALTH_RULE}
         done += 1
         if done % 10 == 0:
             save_health(updates)
     save_health(updates)
-    left = sum(1 for p in folders if p not in albums)
-    log(f"health: checked {done} album folders, {left} never checked yet")
+    left = sum(1 for p in folders if not current(p))
+    log(f"health: checked {done} album folders, {left} not yet checked under the current rule")
 
 
 def save_health(updates):
@@ -1022,7 +1027,7 @@ def save_health(updates):
             else:
                 albums[path] = rec
         fm.save_json(HEALTH, h)
-        fm.save_cache()
+    fm.save_cache()                           # slow, and needs no Lock: it merges by file
     updates.clear()
 
 
@@ -1059,7 +1064,8 @@ def health_items(taken):
                         "foreign_ids": [], "sig": rec["sig"], "flac_album": in_flac and in_flac["id"],
                         "migrated_key": key},
                 "_files": {"flac": files, "mp3": []}}
-        items.append(suspect(item))
+        if suspect(item)["suspect"] or rec["damaged"]:    # judged afresh, not by the stored count
+            items.append(item)
     return items
 
 
@@ -1295,13 +1301,13 @@ def move(src, dst):
         os.rename(src, dst)
     else:
         r = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
-                            "--exclude", ".fuse_hidden*", src + "/", dst + "/"],
+                            *fuse_skip(src), src + "/", dst + "/"],
                            capture_output=True, text=True)
         left = leftovers(src)
         if r.returncode or left:
             # put back whatever landed, so the caller's rollback starts from where it began
             back = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
-                                   "--exclude", ".fuse_hidden*", dst + "/", src + "/"], capture_output=True)
+                                   *fuse_skip(dst), dst + "/", src + "/"], capture_output=True)
             stuck = leftovers(dst)
             if not stuck:
                 subprocess.run(["find", dst, "-depth", "-type", "d", "-empty", "-delete"])
@@ -1321,7 +1327,7 @@ def merge_back(src, dst):
     require_mounted(mount_of(src))
     require_mounted(mount_of(dst))
     r = subprocess.run(["rsync", "-rt", "--checksum", "--remove-source-files",
-                        "--exclude", ".fuse_hidden*", src + "/", dst + "/"], capture_output=True, text=True)
+                        *fuse_skip(src), src + "/", dst + "/"], capture_output=True, text=True)
     left = leftovers(src)
     if r.returncode or left:
         raise RuntimeError(f"rsync {src}: {r.stderr.strip()[:200]} ({len(left)} left)")
@@ -1330,10 +1336,24 @@ def merge_back(src, dst):
     prune(src, mount_of(src))
 
 
+def on_ntfs(path):
+    try:
+        return mount_of(path) in CONF.get("ntfs_bins", [])
+    except RuntimeError:
+        return False
+
+
+def fuse_skip(src):
+    """`.fuse_hidden*` is ntfs-3g's name for a file already deleted while something still
+    had it open - gone, just not yet released. Anywhere else it is an ordinary file (a
+    Soulseek folder can hold one), and is moved like any other."""
+    return ["--exclude", ".fuse_hidden*"] if on_ntfs(src) else []
+
+
 def leftovers(folder):
-    """Files still in a folder after a move. `.fuse_hidden*` is ntfs-3g's name for a file
-    already deleted while something still had it open - gone, just not yet released."""
-    return [f for _, _, fs in os.walk(folder) for f in fs if not f.startswith(".fuse_hidden")]
+    """Files still in a folder after a move, not counting ntfs-3g's lingering ones."""
+    ntfs = on_ntfs(folder)
+    return [f for _, _, fs in os.walk(folder) for f in fs if not (ntfs and f.startswith(".fuse_hidden"))]
 
 
 def clear_fuse_hidden(folder, wait=10):
@@ -2633,10 +2653,17 @@ def download_import(item, force=False):
     done = wait_command(inst, cmd.get("id")) if cmd.get("id") else {"status": "completed"}
     left = fm.folder_audio([folder])
     if done.get("status") != "completed" or left:
+        why = (f"Lidarr's import {done.get('status', 'ended')} with {len(left)} of {len(files)} files still in the folder"
+               + (f": {done.get('message')}" if done.get("message") else ""))
+        if len(left) < len(files) or done.get("status") == "timeout":
+            # some files may be in the library already: recorded, so the bin says where they came from
+            en.d["ops"][0]["left"] = len(left)
+            en.d["interrupted"] = True
+            en.d["label"] += f" (partly imported: {len(files) - len(left)} of {len(files)} files)"
+            save_entry(en.d)
+            raise RuntimeError(why + ". It is recorded in the bin; look in Lidarr's Activity, then press Update")
         drop_journal(en.d)
-        raise RuntimeError(f"Lidarr's import {done.get('status', 'ended')} with {len(left)} of {len(files)} files still in the folder"
-                           + (f": {done.get('message')}" if done.get("message") else "")
-                           + ". Nothing is recorded; look in Lidarr's Activity, then press Update")
+        raise RuntimeError(why + ". Nothing is recorded; look in Lidarr's Activity, then press Update")
     # the folder is left holding cover art and the like: into the bin, so nothing is deleted here
     if os.path.isdir(folder):
         en.to_bin(folder)
@@ -2814,48 +2841,50 @@ def art_files(item):
     return files, sorted({os.path.dirname(p) for p in files})
 
 
-def embed_art(en, path, data, w, h):
-    """Replace the pictures in one file, keeping the old ones in the bin for Undo. The file
-    keeps its timestamp: that is when it arrived, and the Arriving hold counts from it."""
-    st = os.stat(path)
-    try:
-        kept = embed_art_now(en, path, data, w, h)
-    finally:
-        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
-    return kept
-
-
-def embed_art_now(en, path, data, w, h):
+def keep_art(en, path):
+    """Copy one file's pictures into the bin, before anything is written, so Undo has them."""
     keep_dir = os.path.join(os.path.dirname(bin_dir(en.d["id"], path)), "art")
     kept = []
     if path.lower().endswith(".flac"):
-        f = mutagen.flac.FLAC(path)
-        for k, pic in enumerate(f.pictures):
-            kp = os.path.join(keep_dir, f"{os.path.basename(path)}.{k}.pic")
-            os.makedirs(keep_dir, exist_ok=True)
-            with open(kp, "wb") as out:
-                out.write(pic.write())
-            kept.append(kp)
-        pic = mutagen.flac.Picture()
-        pic.type, pic.mime, pic.width, pic.height, pic.depth, pic.data = 3, "image/jpeg", w, h, 24, data
-        f.clear_pictures()
-        f.add_picture(pic)
-        f.save()
+        pics = [pic.write() for pic in mutagen.flac.FLAC(path).pictures]
     else:
         try:
-            f = mutagen.id3.ID3(path)
+            frames = mutagen.id3.ID3(path).getall("APIC")
         except mutagen.id3.ID3NoHeaderError:
-            f = mutagen.id3.ID3()
-        for k, frame in enumerate(f.getall("APIC")):
-            kp = os.path.join(keep_dir, f"{os.path.basename(path)}.{k}.pic")
-            os.makedirs(keep_dir, exist_ok=True)
-            with open(kp, "wb") as out:
-                out.write(frame.data)
-            kept.append({"file": kp, "mime": frame.mime, "type": int(frame.type), "desc": frame.desc})
-        f.delall("APIC")
-        f.add(mutagen.id3.APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=data))
-        f.save(path)
+            frames = []
+        pics = [frame.data for frame in frames]
+    for k, raw in enumerate(pics):
+        kp = os.path.join(keep_dir, f"{os.path.basename(path)}.{k}.pic")
+        os.makedirs(keep_dir, exist_ok=True)
+        with open(kp, "wb") as out:
+            out.write(raw)
+        kept.append(kp if path.lower().endswith(".flac") else
+                    {"file": kp, "mime": frames[k].mime, "type": int(frames[k].type), "desc": frames[k].desc})
     return kept
+
+
+def embed_art(path, data, w, h):
+    """Replace the pictures in one file. The file keeps its timestamp: that is when it
+    arrived, and the Arriving hold counts from it."""
+    st = os.stat(path)
+    try:
+        if path.lower().endswith(".flac"):
+            f = mutagen.flac.FLAC(path)
+            pic = mutagen.flac.Picture()
+            pic.type, pic.mime, pic.width, pic.height, pic.depth, pic.data = 3, "image/jpeg", w, h, 24, data
+            f.clear_pictures()
+            f.add_picture(pic)
+            f.save()
+        else:
+            try:
+                f = mutagen.id3.ID3(path)
+            except mutagen.id3.ID3NoHeaderError:
+                f = mutagen.id3.ID3()
+            f.delall("APIC")
+            f.add(mutagen.id3.APIC(encoding=3, mime="image/jpeg", type=3, desc="Cover", data=data))
+            f.save(path)
+    finally:
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
 def restore_art(o):
@@ -2878,7 +2907,12 @@ def restore_art_now(o):
             f.add_picture(pic)
         f.save()
     else:
-        f = mutagen.id3.ID3(path)
+        try:
+            f = mutagen.id3.ID3(path)
+        except mutagen.id3.ID3NoHeaderError:    # never written, and had no tag to begin with
+            if not o["kept"]:
+                return
+            f = mutagen.id3.ID3()
         f.delall("APIC")
         for k in o["kept"]:
             f.add(mutagen.id3.APIC(encoding=3, mime=k["mime"], type=k["type"], desc=k["desc"], data=open(k["file"], "rb").read()))
@@ -2908,9 +2942,11 @@ def set_art(item, upload):
         en.d["ops"].append(op)
         en.journal()
         for p in files:
-            kept = embed_art(en, p, data, w, h)
-            op["files"].append({"file": p, "kept": kept})
+            # recorded before the file is written, so a crash mid-write still leaves Undo
+            # the original pictures; restoring an unwritten file changes nothing
+            op["files"].append({"file": p, "kept": keep_art(en, p)})
             en.journal()
+            embed_art(p, data, w, h)
         del op["pending"]
         for d in folders:
             out = os.path.join(d, "cover.jpg")

@@ -19,6 +19,7 @@ conf = {
     "migrated": f"{T}/migrated.json", "returned": f"{T}/returned.json",
     "damaged": f"{T}/damaged.json",
     "check_mounts": False,                       # sandbox folders are not mount points
+    "ntfs_bins": [DATA],
 }
 failures = 0
 
@@ -704,6 +705,15 @@ open(f"{MUSIC}/FLAC/Fake/Copy/02.flac", "ab").write(b"\0")
 check(S.health_items(set()) == [], "a changed folder waits for the next night")
 S.health(5)
 check(len(S.health_items(set())) == 1, "and comes back if it's still bad")
+hj = load(S.HEALTH)
+check(hj["albums"][f"{MUSIC}/FLAC/Fake/Copy"]["rule"] == S.HEALTH_RULE, "each record notes the rule it was judged by")
+hj["albums"][f"{MUSIC}/FLAC/Fake/Copy"].update(rule=[20500], low=0)
+fine = hj["albums"][f"{MUSIC}/FLAC/Well/Fine"]; fine["low"] = fine["of"]       # a stale "bad" count
+json.dump(hj, open(S.HEALTH, "w"))
+check([i["title"] for i in S.health_items(set())] == [], "a stored count the fresh verdict disagrees with lists nothing")
+S.health(5)
+check(load(S.HEALTH)["albums"][f"{MUSIC}/FLAC/Fake/Copy"]["low"] == 2 and len(S.health_items(set())) == 1,
+      "a record made under another rule is checked again, though its files haven't changed")
 h2 = S.health_items(set())[0]
 json.dump({"items": [h2]}, open(f"{STATE}/queue.json", "w"))
 r = sift("resolve", str(h2["id"]), "bin_album")
@@ -1187,8 +1197,11 @@ try:
 except RuntimeError as e:
     raised = str(e)
 S.lidarr = fake_lidarr
-check(raised and "1 of 2 files still in the folder" in raised and len(load(f"{STATE}/bin.json")["entries"]) == bins_before + 1
-      and not os.listdir(f"{STATE}/pending"), "an import Lidarr leaves half done is reported, recorded nowhere, and leaves no journal")
+half = load(f"{STATE}/bin.json")["entries"]
+check(raised and "1 of 2 files still in the folder" in raised and "recorded in the bin" in raised
+      and len(half) == bins_before + 2 and half[-1]["interrupted"] and "partly imported: 1 of 2" in half[-1]["label"]
+      and half[-1]["ops"][0]["left"] == 1 and not os.listdir(f"{STATE}/pending"),
+      "an import Lidarr leaves half done is reported and recorded in the bin, with no journal left")
 S.download(items["Mixed"]["id"], "bin")
 entry = load(f"{STATE}/bin.json")["entries"][-1]
 check(entry["decision"] == "bin_download" and not os.path.exists(f"{DL}/Mixed")
@@ -1310,8 +1323,52 @@ Image.new("RGB", (300, 300), "green").save(f"{STATE}/uploads/d.jpg")
 S.set_art({"id": S.download_id("Tape"), "artist": "", "title": "Tape", "tracks": [], "_dir": f"{DL}/Tape", "_files": [f"{DL}/Tape/01.mp3"]}, f"{STATE}/uploads/d.jpg")
 apic = mutagen.id3.ID3(f"{DL}/Tape/01.mp3").getall("APIC")
 check(len(apic) == 1 and apic[0].mime == "image/jpeg" and os.path.isfile(f"{DL}/Tape/cover.jpg"), "an MP3 download gets the picture as its APIC frame, and a cover.jpg")
+# killed between writing one file and recording the next: Undo still has the first file's pictures
+Image.new("RGB", (50, 50), "red").save(f"{STATE}/uploads/77-b.png")
+real_embed, written = S.embed_art, []
+def embed_then_die(p, *a):
+    if written:
+        raise KeyboardInterrupt                   # what a kill looks like from inside: nothing caught
+    real_embed(p, *a); written.append(p)
+S.embed_art = embed_then_die
+try:
+    S.set_art(pic_item, f"{STATE}/uploads/77-b.png")
+except KeyboardInterrupt:
+    pass
+S.embed_art = real_embed
+S.recover()
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+r = sift("undo", entry["id"])
+pics = [mutagen.flac.FLAC(f"{DATA}/music-flac/Pic/Alb/0{k}.flac").pictures for k in (1, 2)]
+check(entry["interrupted"] and r.returncode == 0 and len(pics[0]) == 1 and pics[0][0].data == old_pic.data and pics[1] == [],
+      "art cut off mid-way is in the bin, and Undo restores the file written before the cut")
 r = sift("art", "77", "/etc/hostname", ok=False)
 check(r.returncode != 0 and "the app saved" in r.stdout + r.stderr, "a picture from anywhere but the app's uploads folder is refused")
+
+print("fuse_hidden, vet and the shared cache")
+check(S.fuse_skip(f"{DATA}/music-flac/x") and not S.fuse_skip(f"{DL}/x") and not S.fuse_skip(f"{MUSIC}/FLAC/x"),
+      ".fuse_hidden files are skipped on the NTFS drive only")
+os.makedirs(f"{DL}/Odd", exist_ok=True)
+open(f"{DL}/Odd/.fuse_hidden0001", "w").write("a stranger's file")
+check(S.leftovers(f"{DL}/Odd") == [".fuse_hidden0001"], "elsewhere one is an ordinary file, so a move takes it along")
+shutil.rmtree(f"{DL}/Odd")
+os.makedirs(f"{T}/vet", exist_ok=True)
+shutil.copy(f"{M}/fake.flac", f"{T}/vet/01.flac"); shutil.copy(f"{M}/real.flac", f"{T}/vet/02.flac"); shutil.copy(f"{M}/fake.flac", f"{T}/vet/03.flac")
+state_before = sorted(os.listdir(STATE))
+r = sift("vet", f"{T}/vet")
+v = json.loads(r.stdout.strip().splitlines()[-1])
+check(v["flac"] == 3 and v["low"] == 2 and v["of"] == 3 and v["suspect"] and v["damaged"] == [] and sorted(os.listdir(STATE)) == state_before,
+      "vet judges a folder as the queue does, and changes no state")
+cache_file = S.fm.CACHE
+S.measure(f"{T}/vet/02.flac")                     # this process holds an entry too
+S.fm.save_cache()
+disk = load(cache_file)
+p0 = f"{T}/vet/02.flac"
+disk["files"][p0]["edge"] = 0.99                  # another process measured more since we loaded
+json.dump(disk, open(cache_file, "w"))
+S.fm.cache()["files"][p0].pop("edge", None)
+S.fm.save_cache()
+check(load(cache_file)["files"][p0].get("edge") == 0.99, "saving the cache never takes back what another process measured")
 
 # Sleeve's Send to Soulseek: its claimed folders are neither listed nor touched, and
 # sleeve-file files one by the shared naming rule, as an undoable bin entry

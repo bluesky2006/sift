@@ -189,10 +189,14 @@ function startJob(kind, args, label) {
   const take = (b) => { j.output = (j.output + b.toString()).slice(-8000); };
   child.stdout.on('data', take);
   child.stderr.on('data', take);
-  child.on('close', (code) => {
-    j.done = true; j.ok = code === 0; j.finished = Date.now();
+  const finish = (ok) => {
+    if (j.done) return;
+    j.done = true; j.ok = ok; j.finished = Date.now();
     audit({ event: 'job-done', kind, label, ok: j.ok, output: j.ok ? undefined : j.output.slice(-500) });
-  });
+  };
+  child.on('close', (code) => finish(code === 0));
+  // python3 that won't start (out of memory, too many files) fails the job, not the server
+  child.on('error', (e) => { take(Buffer.from(`the engine could not start: ${e.code || e.message}\n`)); finish(false); });
   job = j;
   return j;
 }
