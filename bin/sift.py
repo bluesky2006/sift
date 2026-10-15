@@ -32,7 +32,7 @@ lands in Ready only after every FLAC file passes `flac -t` and every MP3 track m
 FLAC track by fingerprint, and most FLAC tracks reach above SUSPECT_HZ (a FLAC that stops
 lower is usually a converted MP3, and waits in Suspect FLAC instead).
 """
-import base64, collections, math, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
+import base64, collections, math, unicodedata, fcntl, hashlib, hmac, json, os, re, shutil, sqlite3, subprocess, sys, time, \
     urllib.parse, urllib.request, uuid, zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -1026,7 +1026,7 @@ def save_health(updates):
                 albums.pop(path, None)
             else:
                 albums[path] = rec
-        fm.save_json(HEALTH, h)
+        save_record(HEALTH, h)
     fm.save_cache()                           # slow, and needs no Lock: it merges by file
     updates.clear()
 
@@ -1073,7 +1073,7 @@ def dismiss(item):
     """Library health only: this album is fine as it is, until its files change."""
     h = fm.load_json(HEALTH, {})
     h.setdefault("dismissed", {})[item["_do"]["flac_dir"]] = item["_do"]["sig"]
-    fm.save_json(HEALTH, h)
+    save_record(HEALTH, h)
     q = fm.load_json(QUEUE, {})
     q["items"] = [i for i in q.get("items", []) if i["id"] != item["id"]]
     fm.save_json(QUEUE, q)
@@ -1102,7 +1102,7 @@ def health_refetch(item, en):
 
 
 def build_queue():
-    ov = fm.load_json(OVERRIDES, {})
+    ov = load_record(OVERRIDES, {})
     one = {int(k) for k, v in ov.items() if v.get("one_album")}
     plan = fm.build_plan(one_album=one)
     hold = fm.load_json(CONF["damaged"], {})
@@ -1402,7 +1402,7 @@ class Entry:
         before = lidarr(inst, f"/album/{album_id}").get("monitored")
         op = {"op": "monitor", "inst": inst, "album": album_id, "before": before}
         if inst == "flac":                    # wanted.json as it was, put back exactly on Undo
-            op["wanted_before"] = fm.load_json(CONF["wanted"], {}).get(str(album_id))
+            op["wanted_before"] = load_record(CONF["wanted"], {}).get(str(album_id))
         self.d["ops"].append(op)
         self.journal()
         lidarr(inst, "/album/monitor", "PUT", {"albumIds": [album_id], "monitored": value})
@@ -1719,7 +1719,7 @@ def strip_id3(folders=None):
             save_entry(en.d)
             h = fm.load_json(HEALTH, {})
             if h.get("albums", {}).pop(folder, None) is not None:
-                fm.save_json(HEALTH, h)            # measured again on the next health run
+                save_record(HEALTH, h)            # measured again on the next health run
             fm.save_cache()
         log(f"strip-id3: {len(en.d['ops'])} tag(s) cut from {artist} — {title}")
         print(f"{artist} — {title}: {len(en.d['ops'])} tag(s) cut", flush=True)
@@ -1850,12 +1850,12 @@ DUPE_DECISIONS = {"keep_flac": dupe_keep_flac, "keep_mp3": dupe_keep_mp3, "refet
 # ---- track tools ---------------------------------------------------------------
 
 def set_override(album_id, change):
-    ov = fm.load_json(OVERRIDES, {})
+    ov = load_record(OVERRIDES, {})
     rec = ov.setdefault(str(album_id), {})
     change(rec)
     if not rec.get("pairs") and not rec.get("one_album"):
         ov.pop(str(album_id), None)
-    fm.save_json(OVERRIDES, ov)
+    save_record(OVERRIDES, ov)
     return ov.get(str(album_id))
 
 
@@ -2023,18 +2023,21 @@ def track_tool(album_id, tool, args):
 def mark_wanted(album_id, on):
     """Keep wanted.json in step with what Sift monitors in Lidarr-FLAC. `on` may be the
     exact value to put back (a timestamp, or None to remove), as Undo does."""
-    data = fm.load_json(CONF["wanted"], {})
+    data = load_record(CONF["wanted"], {})
     if isinstance(on, str):
         data[str(album_id)] = on
     elif on:
         data[str(album_id)] = now()
     else:
         data.pop(str(album_id), None)
-    fm.save_json(CONF["wanted"], data)
+    save_record(CONF["wanted"], data)
 
 
 def find_item(album_id):
-    for i in fm.load_json(QUEUE, {}).get("items", []):
+    items = fm.load_json(QUEUE, {}).get("items", [])
+    if sum(1 for i in items if i["id"] == album_id) > 1:  # two duplicate folders hashed alike
+        raise SystemExit(f"two albums share id {album_id}; decide one from the shell")
+    for i in items:
         if i["id"] == album_id:
             return i
     raise SystemExit(f"album {album_id} is not in the queue")
@@ -2101,10 +2104,10 @@ def resolve(album_id, decision, release=None):
     with Lock():
         item = find_item(album_id)
         if release is not None:
-            options = item.get("releases") or []
-            if decision != "refetch" or not 0 <= release < len(options):
-                raise SystemExit("no such release for this album")
-            item["_release"] = options[release]["release"]
+            try:
+                item["_release"] = pick_release(item, decision, release)
+            except RuntimeError as e:
+                raise SystemExit(str(e))
         if decision == "dismiss":
             if "dismiss" not in item["allowed"]:
                 raise SystemExit("not available for this album")
@@ -2140,6 +2143,23 @@ def resolve_many(decision, ids, only_queue=None):
     return done, items
 
 
+MBID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def pick_release(item, decision, release):
+    """The release to look for. The app sends its MBID, found again in the item as it is
+    now: a check since the choice may have reordered the list, and a position would then
+    name a different release. A bare position is still taken from the shell."""
+    options = item.get("releases") or []
+    if decision == "refetch" and isinstance(release, str):
+        if any(r["release"] == release for r in options):
+            return release
+        raise RuntimeError("that release is no longer offered for this album; choose again")
+    if decision != "refetch" or not 0 <= release < len(options):
+        raise RuntimeError("no such release for this album")
+    return options[release]["release"]
+
+
 def apply_staged(spec):
     """Decisions staged in the app and then approved, each (album id, decision, release
     index or None). Each gets its own bin entry, as one at a time would; an album that
@@ -2157,10 +2177,7 @@ def apply_staged(spec):
                 if not i:
                     raise RuntimeError("no longer in the queue")
                 if release is not None:
-                    options = i.get("releases") or []
-                    if decision != "refetch" or not 0 <= release < len(options):
-                        raise RuntimeError("no such release for this album")
-                    i["_release"] = options[release]["release"]
+                    i["_release"] = pick_release(i, decision, release)
                 decide(i, decision)
                 done.add(album_id)
                 print(f"done [{album_id}] {decision}: {label}", flush=True)
@@ -2531,13 +2548,21 @@ def library_name(root, artist, title, date):
     """Artist/Album under `root`, no year (Simon's choice, 14 Oct 2026): the one naming rule for
     anything filed by tags, by Keep as is here and by Sleeve's Send to Soulseek (sleeve-file).
     `date` is accepted and ignored. None if a name is empty."""
-    # cut before trimming, so a long name never ends in "." or " ", which NTFS won't take
-    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "")[:120].strip(" .")
+    # the start trimmed before cutting and the end after, so a long name never ends in "." or
+    # " " (NTFS won't take it), and any name valid before maps to the same folder as before
+    clean = lambda x: re.sub(r'[\x00-\x1f/\\:*?"<>|]', "_", x or "").lstrip(" .")[:120].rstrip(" .")
     artist, title = clean(artist), clean(title)
     if not artist or not title:
         return None
-    try:   # merge "XEXA" into an existing "Xexa", as the migration does
-        artist = next((d for d in os.listdir(root) if d.casefold() == artist.casefold()), artist)
+    # merge "XEXA" into an existing "Xexa", as the migration does, and a name spelled with
+    # combining accents into the same name spelled with accented letters
+    same = lambda a, b: unicodedata.normalize("NFC", a).casefold() == unicodedata.normalize("NFC", b).casefold()
+    try:
+        artist = next((d for d in os.listdir(root) if same(d, artist)), artist)
+    except OSError:
+        pass
+    try:
+        title = next((d for d in os.listdir(os.path.join(root, artist)) if same(d, title)), title)
     except OSError:
         pass
     return os.path.join(root, artist, title)
@@ -2577,7 +2602,10 @@ def scan_downloads():
 
 
 def find_download(item_id):
-    for i in fm.load_json(DOWNLOADS, {}).get("items", []):
+    items = fm.load_json(DOWNLOADS, {}).get("items", [])
+    if sum(1 for i in items if i["id"] == item_id) > 1:   # two folder names hashed alike
+        raise SystemExit(f"two downloads share id {item_id}; rename one folder, then press Update")
+    for i in items:
         if i["id"] == item_id:
             if not os.path.isdir(i["_dir"]):
                 raise SystemExit("that download folder is gone; press Update")
@@ -2647,7 +2675,9 @@ def fetch_cover_cli(inst, album_id):
     with Lock():
         out = fetch_cover(inst, album_id)
         if out:
-            en = Entry("cover", {"id": album_id, "artist": f"Lidarr{'-FLAC' if inst == 'flac' else ''} album {album_id}",
+            # the bin's album ids are Lidarr-FLAC's: an MP3 album's id would block Undo on
+            # an unrelated FLAC album that happens to share it
+            en = Entry("cover", {"id": album_id if inst == "flac" else None, "artist": f"Lidarr{'-FLAC' if inst == 'flac' else ''} album {album_id}",
                                  "title": "cover.jpg"})
             en.d["ops"].append({"op": "wrote", "file": out, "sha": file_sha(out)})
             save_entry(en.d)
@@ -2687,7 +2717,8 @@ def download_import(item, force=False):
             # some files may be in the library already: recorded, so the bin says where they came from
             en.d["ops"][0]["left"] = len(left)
             en.d["interrupted"] = True
-            en.d["label"] += f" (partly imported: {len(files) - len(left)} of {len(files)} files)"
+            en.d["label"] += (f" (partly imported: {len(files) - len(left)} of {len(files)} files)" if len(left) < len(files)
+                              else " (Lidarr was still importing when Sift stopped waiting)")
             save_entry(en.d)
             raise RuntimeError(why + ". It is recorded in the bin; look in Lidarr's Activity, then press Update")
         drop_journal(en.d)
@@ -3082,8 +3113,8 @@ def main():
             vet(a[1])
         elif len(a) == 3 and a[0] == "resolve":
             resolve(int(a[1]), a[2])
-        elif len(a) == 4 and a[0] == "resolve" and a[3].isdigit():
-            resolve(int(a[1]), a[2], int(a[3]))
+        elif len(a) == 4 and a[0] == "resolve" and (a[3].isdigit() or re.fullmatch(MBID, a[3])):
+            resolve(int(a[1]), a[2], int(a[3]) if a[3].isdigit() else a[3])
         elif len(a) == 3 and a[0] == "resolve-many" and a[1] in DECISIONS \
                 and re.fullmatch(r"\d+(,\d+)*", a[2]):
             done, items = resolve_many(a[1], {int(x) for x in a[2].split(",")})
@@ -3091,13 +3122,13 @@ def main():
         elif len(a) == 2 and a[0] == "health" and a[1].isdigit():
             health(int(a[1]))
         elif len(a) == 2 and a[0] == "apply-staged" \
-                and re.fullmatch(r"\d+:[a-z0-9_]+(:\d+)?(,\d+:[a-z0-9_]+(:\d+)?)*", a[1]):
+                and re.fullmatch(rf"\d+:[a-z0-9_]+(:(\d+|{MBID}))?(,\d+:[a-z0-9_]+(:(\d+|{MBID}))?)*", a[1]):
             spec = []
             for part in a[1].split(","):
                 bits = part.split(":")
                 if bits[1] not in STAGEABLE:
                     sys.exit(f"{bits[1]} can't be staged")
-                spec.append((int(bits[0]), bits[1], int(bits[2]) if len(bits) == 3 else None))
+                spec.append((int(bits[0]), bits[1], None if len(bits) < 3 else int(bits[2]) if bits[2].isdigit() else bits[2]))
             if not apply_staged(spec):
                 sys.exit("nothing was done")
         elif a == ["approve-ready"]:

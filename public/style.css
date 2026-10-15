@@ -390,3 +390,19 @@ kbd { font: 12px ui-monospace, monospace; border: 1px solid var(--line); border-
 body.dropping .cover { outline: 3px dashed var(--accent); outline-offset: 4px; }
 body.dropping .ahead::after { content: "Drop the picture to set the artwork"; color: var(--accent); font-size: 13px; font-weight: 600; }
 .source.warn { color: var(--warn); }
+
+/* a phone's finger: the controls that sit close together get room of their own, rather than
+   tap areas that overlap (move down and bin-track are side by side) */
+@media (max-width: 560px) {
+  .arrows { display: inline-flex; gap: 10px; }
+  .arrows button { min-width: 40px; min-height: 40px; }
+  .arrows button::before { inset: 0; }
+  .arrows .binbtn { margin-left: 10px; }
+  #pclose { min-width: 40px; min-height: 40px; }
+  .back { padding: 10px 4px; margin: 0 4px; }
+  .approvepick { width: 22px; height: 22px; }
+  .pextra .mini { padding: 8px 0; }
+}
+/* a long track name ends in an ellipsis instead of running off the side */
+.plabel { min-width: 0; }
+#ptitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

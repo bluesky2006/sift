@@ -13,6 +13,7 @@ const T = fs.mkdtempSync(path.join(os.tmpdir(), 'sift-srv-'));
 const STATE = path.join(T, 'state');
 const MUSIC = path.join(T, 'music');
 // a free port, so two runs at once don't collide
+const X = '00000000-0000-4000-8000-00000000000a', Y = '00000000-0000-4000-8000-00000000000b', Z = '00000000-0000-4000-8000-00000000000c';
 const PORT = await new Promise((ok) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => ok(p)); }); });
 fs.mkdirSync(STATE, { recursive: true });
 fs.mkdirSync(path.join(MUSIC, 'Art/Alb'), { recursive: true });
@@ -34,7 +35,7 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
     _do: { flac_dir: '/secret/dir' },
     _files: { flac: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd', path.join(MUSIC, 'Art/Alb/link.flac')], mp3: [] },
   }, {
-    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', releases: [{ release: 'x' }, { release: 'y' }], source: { user: 'baduser', albums: 1, bad: 1, blocked: false }, reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
+    id: 2, artist: 'Two', title: 'Tone', queue: 'suspect', releases: [{ release: X }, { release: Y }], source: { user: 'baduser', albums: 1, bad: 1, blocked: false }, reasons: ['r'], allowed: ['keep_mp3', 'refetch', 'watch'],
     suspect: { low: 1, of: 1, hz: 16000, mp3_hz: null },
     flac: { tracks: [{ name: 'tone.flac', cutoff: 16000, lufs: -20 }] }, mp3: null, pairs: [], cover: false,
     _do: { flac_dir: '/secret/two' }, _files: { flac: [path.join(MUSIC, 'Art/Alb/tone.flac')], mp3: [] },
@@ -172,6 +173,24 @@ try {
   check((await req('/api/spectrum/1/flac/2')).status === 404, 'nor through a symlink');
   check((await req('/api/spectrum/2/mp3/0')).status === 404, 'nor for a track that is not there');
   check((await req('/api/cover/1/flac')).status === 404 && (await req('/api/cover/1/wav')).status === 404, 'side covers only by side name');
+  // what sits behind an album's track number can change (a re-fetched copy keeps the id), so
+  // the browser asks each time and is told "not modified" only while the file is the same
+  const tag = (await req('/api/spectrum/2/flac/0')).headers;
+  check(tag.get('cache-control') === 'private, no-cache' && tag.get('etag'), 'a spectrogram is kept by the browser, but checked each time');
+  check((await req('/api/spectrum/2/flac/0', { headers: { 'If-None-Match': tag.get('etag') } })).status === 304, 'and is not sent again while its file is the same');
+  const tone = path.join(MUSIC, 'Art/Alb/tone.flac');
+  fs.utimesSync(tone, new Date(), new Date(Date.now() - 86400000));
+  sp = await req('/api/spectrum/2/flac/0', { headers: { 'If-None-Match': tag.get('etag') } });
+  check(sp.status === 200 && sp.headers.get('etag') !== tag.get('etag'), 'but is, once a different file sits at that number');
+  fs.mkdirSync(path.join(STATE, 'covers'), { recursive: true });
+  fs.writeFileSync(path.join(STATE, 'covers', '1.jpg'), 'one');
+  const ctag = (await req('/api/cover/1')).headers.get('etag');
+  check((await req('/api/cover/1', { headers: { 'If-None-Match': ctag } })).status === 304, 'a cover too');
+  fs.writeFileSync(path.join(STATE, 'covers', '1.jpg'), 'new artwork');
+  check((await req('/api/cover/1', { headers: { 'If-None-Match': ctag } })).status === 200, 'until new artwork is written');
+  const atag = (await req('/api/audio/2/flac/0')).headers;
+  check(atag.get('cache-control') === 'private, no-cache' && (await req('/api/audio/2/flac/0', { headers: { 'If-None-Match': atag.get('etag') } })).status === 304,
+    'and audio');
 
   console.log('audio');
   let r = await req('/api/audio/1/flac/0', { headers: { Range: 'bytes=100-199' } });
@@ -244,7 +263,7 @@ try {
   const queueFile = path.join(STATE, 'queue.json');
   const queueBefore = fs.readFileSync(queueFile, 'utf8');
   const reordered = JSON.parse(queueBefore);
-  reordered.items.find((i) => i.id === 2).releases = [{ release: 'y' }, { release: 'z' }, { release: 'x' }];
+  reordered.items.find((i) => i.id === 2).releases = [{ release: Y }, { release: Z }, { release: X }];
   fs.writeFileSync(queueFile, JSON.stringify(reordered));
   check((await req('/api/apply-staged', { method: 'POST', body: { ids: [1] } })).status === 403, 'approving needs CSRF');
   check((await req('/api/apply-staged', { method: 'POST', body: { ids: [99] }, csrf })).status === 400, 'approving something not staged is refused');
@@ -252,8 +271,8 @@ try {
   r = await req('/api/apply-staged', { method: 'POST', body: { ids: [2, 1] }, csrf });
   check(r.status === 202 && (await r.json()).n === 2, 'approving starts one job');
   await new Promise((res) => setTimeout(res, 1500));
-  check(/apply-staged (1:keep_flac,2:refetch:0|2:refetch:0,1:keep_flac)$/.test(lastCall()),
-    `the engine gets what was staged, from the server, with the release found by its id where it sits now (${lastCall()})`);
+  check(new RegExp(`apply-staged (1:keep_flac,2:refetch:${Y}|2:refetch:${Y},1:keep_flac)$`).test(lastCall()),
+    `the engine gets what was staged, from the server, as the release's MBID, so it can't name another one (${lastCall()})`);
   fs.writeFileSync(queueFile, queueBefore);
   check((await stagedNow()).length === 0, 'and the staged list is empty');
   await req('/api/decide', { method: 'POST', body: { id: 1, decision: 'keep_flac' }, csrf });
@@ -280,11 +299,15 @@ try {
   check((await req('/api/undo', { method: 'POST', body: { entry: '../../etc' }, csrf })).status === 404, 'unknown bin entry refused');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'nope' }, csrf })).status === 401, 'emptying needs the password');
   check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password' } })).status === 403, 'and a CSRF token');
-  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true }, csrf })).status === 400, 'emptying the old part needs a retention setting');
+  const shown = (await (await req('/api/state')).json()).bin.map((e) => e.id);
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true, shown }, csrf })).status === 400, 'emptying the old part needs a retention setting');
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', shown: [] }, csrf })).status === 409
+    && (await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password' }, csrf })).status === 400,
+    'emptying refuses unless the bin is exactly what the page showed');
   check((await req('/api/settings', { method: 'POST', body: { retention_days: '30; rm' }, csrf })).status === 400, 'retention must be a whole number of days');
   check((await req('/api/settings', { method: 'POST', body: { retention_days: 30 }, csrf })).status === 200
     && (await (await req('/api/state')).json()).settings.retention_days === 30, 'retention is saved');
-  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true }, csrf })).status === 202, 'then the old part can be emptied');
+  check((await req('/api/bin/empty', { method: 'POST', body: { password: 'a-long-test-password', older: true, shown }, csrf })).status === 202, 'then the old part can be emptied');
   await new Promise((res) => setTimeout(res, 1500));
   check(fs.readFileSync(path.join(T, 'calls'), 'utf8').trim().split('\n').pop().endsWith('empty-bin 30'), 'with the days from the setting, not the browser');
 

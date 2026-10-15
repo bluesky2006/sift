@@ -559,6 +559,7 @@ function neighbours(a) {
   const k = list.findIndex((i) => i.id === a.id);
   return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null, at: k, of: list.length };
 }
+let deciding = false;         // a decision being asked about or sent
 let afterJob = null;          // where to go once the decision in progress succeeds
 let artStamp = '';            // changes when artwork is written, so cover pictures reload
 
@@ -842,6 +843,13 @@ async function renderAlbum(id, keepMode = false) {
   if (facts) facts.ontoggle = () => localStorage.setItem('sift-facts', facts.open ? 'open' : 'closed');
   view.querySelectorAll('[data-decide]').forEach((b) => {
     b.onclick = async () => {
+      if (deciding) return;                   // a double tap, or the key pressed twice
+      deciding = true;
+      try { await decideWith(b); } finally { deciding = false; }
+    };
+  });
+  async function decideWith(b) {
+    {
       const [title, body] = texts[b.dataset.decide];
       const rels = b.dataset.decide === 'refetch' && (a.releases || []).length > 1 ? a.releases : null;
       let chosen = 0;
@@ -859,14 +867,14 @@ async function renderAlbum(id, keepMode = false) {
       // keeping a FLAC nothing confirms asks too: it is the one decision that adds an album you never had
       const answer = stageable && !rels && !((a.dupe || a.health) && b.dataset.decide === 'refetch')
         && !(a.no_mp3 && !a.refetched && b.dataset.decide === 'keep_flac') ? true
-        : await ask({ title: `${title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
+        : await ask({ title: `${title}: ${a.artist} — ${a.title}?`, body, ok: stageable ? `Stage: ${title}` : title, choices: rels && rels.map(label), chosen });
       if (!answer) return;
       const n = neighbours(a).next || neighbours(a).prev;
       const decision = { id: a.id, decision: b.dataset.decide, ...(rels ? { release: answer.choice } : {}) };
-      if (!stageable) { afterJob = n ? `#/album/${n.id}` : '#/'; run('/api/decide', decision); return; }
+      if (!stageable) { afterJob = n ? `#/album/${n.id}` : '#/'; await run('/api/decide', decision); return; }
       await stageDecision('/api/decide', decision, n && n.id !== a.id ? `#/album/${n.id}` : '#/');
-    };
-  });
+    }
+  }
   if ($('unstage')) {
     $('unstage').onclick = async () => {
       try { await api('/api/unstage', { ids: [a.id] }); } catch (e) { toast(e.message); return; }
@@ -1235,7 +1243,12 @@ function play(side, idx, row) {
 
 function seekTo(deck, t) {
   const go = () => { deck.currentTime = Math.min(t, Math.max(0, (deck.duration || t) - 0.5)); };
-  if (deck.readyState >= 1) go(); else deck.addEventListener('loadedmetadata', go, { once: true });
+  // one seek waiting per deck: pressing A/B again before a track loads replaces it
+  if (deck.pendingSeek) deck.removeEventListener('loadedmetadata', deck.pendingSeek);
+  deck.pendingSeek = null;
+  if (deck.readyState >= 1) { go(); return; }
+  deck.pendingSeek = () => { deck.pendingSeek = null; go(); };
+  deck.addEventListener('loadedmetadata', deck.pendingSeek, { once: true });
 }
 
 $('ab').onclick = () => {
@@ -1322,6 +1335,7 @@ function renderBin() {
   view.querySelectorAll('[data-undo]').forEach((b) => {
     b.onclick = async () => {
       const e = state.bin.find((x) => x.id === b.dataset.undo);
+      if (!e) { toast('That entry has gone from the bin.'); renderBin(); return; }
       if (await ask({ title: 'Undo?', body: `Put ${e.label} back the way it was before.`, ok: 'Undo' })) {
         run('/api/undo', { entry: e.id });
       }
@@ -1341,7 +1355,8 @@ function renderBin() {
         danger: true, password: true, ok: 'Delete for good', error,
         body: `${older ? 'Those entries are' : 'Everything in the bin is'} deleted, and none of it can be undone afterwards. Enter the password to confirm.` });
       if (pw == null) return;
-      try { await api('/api/bin/empty', { password: pw, older }); watchJob(); return; } catch (e) {
+      try { await api('/api/bin/empty', { password: pw, older, shown: state.bin.map((e) => e.id) }); watchJob(); return; } catch (e) {
+        if (e.status === 409) { toast(e.message); await loadState(); renderBin(); return; }
         if (e.status !== 401) { toast(e.message); return; }
         if (e.message === 'not signed in') { location.href = '/'; return; }   // the session ran out
         error = 'Wrong password';
@@ -1452,7 +1467,13 @@ function route() {
   return renderList();
 }
 
-window.addEventListener('hashchange', () => { window.scrollTo(0, 0); mode = 'view'; album = null; artTarget = null; route(); });
+window.addEventListener('hashchange', () => {
+  // a question asked on the page being left is cancelled: OK must never act on an album
+  // that is no longer on screen. And having gone elsewhere, a finishing job doesn't pull you back
+  if ($('dialog').open) $('dialog').close('');
+  if (location.hash !== afterJob) afterJob = null;
+  window.scrollTo(0, 0); mode = 'view'; album = null; artTarget = null; route();
+});
 $('check').onclick = () => run('/api/check', {});
 // History and Sign out live behind the ⋯ menu; anything outside it, or Esc, closes it
 const menu = (open) => {
@@ -1472,7 +1493,14 @@ $('paths').onclick = () => {
   if (location.hash.startsWith('#/album/')) route();
 };
 $('logout').onclick = async () => { await fetch('/api/auth/logout', { method: 'POST', headers: { 'X-CSRF': csrf || '' } }); location.href = '/'; };
-setInterval(() => { if (!polling) loadState().then(() => { if ((location.hash || '#/') === '#/') renderList(); }).catch(() => {}); }, 60000);
+setInterval(() => {
+  if (polling) return;
+  loadState().then(() => {
+    const h = location.hash || '#/';
+    if (h === '#/') renderList();
+    else if (h === '#/bin' && !$('dialog').open) renderBin();      // never under an open question
+  }).catch(() => {});
+}, 60000);
 
 (async () => {
   csrf = (await api('/api/csrf')).csrf;

@@ -51,6 +51,25 @@ function send(res, status, body, extra = {}) {
   res.writeHead(status, headers({ 'Content-Length': buf.length, ...extra }));
   res.end(buf);
 }
+// Covers, spectrograms and audio sit at addresses that name an album and a track number, and
+// what is behind one changes (a re-fetched copy keeps the album's id; reordering or binning a
+// track moves the rest up). So the browser keeps them but asks each time, and the answer is a
+// "not modified" while the file's inode, size and time are the same.
+const REVALIDATE = 'private, no-cache';
+const etagOf = (st) => `"${st.ino.toString(36)}-${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`;
+function notModified(req, res, etag) {
+  if (req.headers['if-none-match'] !== etag) return false;
+  res.writeHead(304, headers({ ETag: etag, 'Cache-Control': REVALIDATE }));
+  res.end();
+  return true;
+}
+// the engine is told a release by its MBID (from queue.json, never the browser), so a check
+// that reorders the list between choosing and running can't make it a different release
+const MBID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const releaseArg = (item, idx) => {
+  const r = ((item && item.releases) || [])[idx];
+  return r && MBID.test(r.release) ? r.release : String(idx);
+};
 const json = (res, status, obj, extra = {}) =>
   send(res, status, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8', ...extra });
 
@@ -158,9 +177,16 @@ async function readStaged(q) {
     return at >= 0 && at < releases.length ? { ...e, release: at } : null;
   }).filter(Boolean);
 }
+// written whole and flushed to disk before it replaces the old one, as the engine's records are
+let tmpSeq = 0;
+async function writeDurable(file, text) {
+  const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
+  const fh = await fsp.open(tmp, 'w');
+  try { await fh.writeFile(text); await fh.sync(); } finally { await fh.close(); }
+  await fsp.rename(tmp, file);
+}
 async function writeStaged(entries) {
-  await fsp.writeFile(path.join(STATE, 'staged.json.tmp'), JSON.stringify({ entries }));
-  await fsp.rename(path.join(STATE, 'staged.json.tmp'), path.join(STATE, 'staged.json'));
+  await writeDurable(path.join(STATE, 'staged.json'), JSON.stringify({ entries }));
   cache.delete(path.join(STATE, 'staged.json'));   // two writes in one millisecond share an mtime
 }
 // read-change-write on staged.json one request at a time
@@ -213,6 +239,8 @@ async function streamFile(req, res, file) {
   if (!real || !AUDIO_ROOTS.some((r) => real.startsWith(r + '/'))) return send(res, 404, 'not found');
   if (job && !job.done) return send(res, 503, 'busy');
   const st = await fsp.stat(real);
+  const etag = etagOf(st);
+  if (!req.headers.range && notModified(req, res, etag)) return;
   const type = real.toLowerCase().endsWith('.flac') ? 'audio/flac' : 'audio/mpeg';
   const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
   let start = 0, end = st.size - 1, status = 200;
@@ -227,7 +255,7 @@ async function streamFile(req, res, file) {
   }
   res.writeHead(status, headers({
     'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1,
-    'Cache-Control': 'private, max-age=3600',
+    'Cache-Control': REVALIDATE, ETag: etag,
     ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${st.size}` } : {}),
   }));
   if (req.method === 'HEAD') return res.end();
@@ -475,18 +503,23 @@ async function handle(req, res) {
 
   if ((m = /^\/api\/cover\/(\d+)(?:\/(flac|mp3))?$/.exec(p)) && req.method === 'GET') {
     try {
-      const body = await fsp.readFile(path.join(STATE, 'covers', `${Number(m[1])}${m[2] ? `-${m[2]}` : ''}.jpg`));
-      return send(res, 200, body, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=86400' });
+      const file = path.join(STATE, 'covers', `${Number(m[1])}${m[2] ? `-${m[2]}` : ''}.jpg`);
+      const etag = etagOf(await fsp.stat(file));
+      if (notModified(req, res, etag)) return;
+      return send(res, 200, await fsp.readFile(file), { 'Content-Type': 'image/jpeg', 'Cache-Control': REVALIDATE, ETag: etag });
     } catch { return send(res, 404, 'not found'); }
   }
 
   if ((m = /^\/api\/spectrum\/(d?\d+)\/(flac|mp3)\/(\d+)$/.exec(p)) && req.method === 'GET') {
     const file = await trackFile(m[1], m[2], m[3]);
     if (!file) return send(res, 404, 'not found');
+    const src = await fsp.stat(file).catch(() => null);
+    const etag = src && etagOf(src);
+    if (etag && notModified(req, res, etag)) return;
     const out = await spectrum(file);
     if (out === 'refused') return send(res, 404, 'not found');
     if (!out) return send(res, 503, 'not available now', { 'Retry-After': '10' });
-    return send(res, 200, await fsp.readFile(out), { 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=86400' });
+    return send(res, 200, await fsp.readFile(out), { 'Content-Type': 'image/png', 'Cache-Control': REVALIDATE, ...(etag ? { ETag: etag } : {}) });
   }
 
   if (p === '/api/history' && req.method === 'GET') return json(res, 200, await history());
@@ -543,7 +576,7 @@ async function handle(req, res) {
         if (body.decision !== 'refetch' || !Number.isInteger(body.release) || body.release < 0 || body.release >= n) {
           return json(res, 400, { error: 'bad release' });
         }
-        args.push(String(body.release));
+        args.push(releaseArg(item, body.release));
       }
       if (STAGEABLE.has(body.decision)) {
         await stage(q, [{ id, decision: body.decision, release: body.release }]);
@@ -637,7 +670,8 @@ async function handle(req, res) {
         const staged = await readStaged(q);
         const go = staged.filter((e) => want.has(e.id));
         if (!go.length) return 'none';
-        const spec = go.map((e) => [e.id, e.decision, ...(e.release != null ? [e.release] : [])].join(':')).join(',');
+        const byId = new Map(q.items.map((i) => [i.id, i]));
+        const spec = go.map((e) => [e.id, e.decision, ...(e.release != null ? [releaseArg(byId.get(e.id), e.release)] : [])].join(':')).join(',');
         audit({ event: 'apply-staged', entries: go });
         // taken out before the job starts, so a failed write can't leave them to approve twice
         await writeStaged(staged.filter((e) => !want.has(e.id)));
@@ -701,8 +735,7 @@ async function handle(req, res) {
       const days = body.retention_days;
       if (!Number.isInteger(days) || days < 0 || days > 3650) return json(res, 400, { error: 'bad setting' });
       const next = { ...(await readState('settings.json', {})), retention_days: days || null };
-      await fsp.writeFile(path.join(STATE, 'settings.json.tmp'), JSON.stringify(next));
-      await fsp.rename(path.join(STATE, 'settings.json.tmp'), path.join(STATE, 'settings.json'));
+      await writeDurable(path.join(STATE, 'settings.json'), JSON.stringify(next));
       audit({ event: 'settings', retention_days: days });
       return json(res, 200, { ok: true });
     }
@@ -716,6 +749,16 @@ async function handle(req, res) {
         return json(res, 401, { error: 'wrong password' });
       }
       auth.clearFailures(req.socket.remoteAddress);
+      // only what the page showed when it asked: anything binned since (a job, the shell,
+      // another tab) would otherwise go too, uncounted in the size the question gave
+      const shown = body.shown;
+      if (!Array.isArray(shown) || shown.length > 10000 || !shown.every((x) => typeof x === 'string' && /^[\w-]{1,40}$/.test(x))) {
+        return json(res, 400, { error: 'bad list' });
+      }
+      const now = (await readState('bin.json', { entries: [] })).entries.map((e) => e.id);
+      if (now.length !== shown.length || !now.every((x) => shown.includes(x))) {
+        return json(res, 409, { error: 'The bin has changed since this page was drawn. Look again, then empty it.' });
+      }
       const days = (await readState('settings.json', {})).retention_days;
       if (body.older && !days) return json(res, 400, { error: 'no retention set' });
       audit({ event: 'empty-bin', older: body.older ? days : undefined });

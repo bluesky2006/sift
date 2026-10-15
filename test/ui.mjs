@@ -426,6 +426,19 @@ try {
   await page.click('[data-decide="keep_flac"]');
   check((await page.locator('#dbody').textContent()).includes('no MP3 of it to bin'), 'and the confirmation says nothing is being replaced');
   await page.click('#dcancel');
+  // a question left open while going elsewhere (the phone's back gesture) is cancelled, so
+  // OK can never decide an album that is no longer on screen
+  await page.click('[data-decide="keep_flac"]');
+  check((await page.locator('#dtitle').textContent()).includes('—'), 'the question names the album it is about');
+  let decided = false;
+  const spy = (r) => { if (r.url().includes('/api/decide')) decided = true; };
+  page.on('request', spy);
+  await page.evaluate(() => { location.hash = '#/bin'; });
+  await page.waitForTimeout(300);
+  check(!(await page.locator('#dialog').evaluate((d) => d.open)) && !decided, 'leaving the page closes the question, deciding nothing');
+  page.off('request', spy);
+  await page.goto(BASE + '/app#/album/9');
+  await page.waitForSelector('[data-decide="keep_flac"]');
   check((await page.locator('.decisions button').allTextContents()).join('|') === 'Keep FLAC|Get a better FLAC|Put in the bin',
     'Put in the bin is offered, so an album that is not a good match can go');
   await page.click('[data-decide="bin_album"]');

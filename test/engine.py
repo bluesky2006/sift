@@ -1407,6 +1407,40 @@ except RuntimeError as e:
     huge = str(e)
 check(huge and "too many pixels" in huge, "a picture of too many pixels is refused before it is decoded")
 
+print("damaged state, releases by id, accents")
+open(S.CONF["wanted"], "w").write('{"1": "x", "2"')
+try:
+    S.mark_wanted(3, True)
+    bad = None
+except RuntimeError as e:
+    bad = str(e)
+check(bad and "won't parse" in bad and open(S.CONF["wanted"]).read() == '{"1": "x", "2"',
+      "a wanted.json that won't parse stops the job, and is never written over with one album")
+json.dump({}, open(S.CONF["wanted"], "w"))
+rel = {"releases": [{"release": "00000000-0000-4000-8000-00000000000a"}, {"release": "00000000-0000-4000-8000-00000000000b"}]}
+check(S.pick_release(rel, "refetch", "00000000-0000-4000-8000-00000000000b") == "00000000-0000-4000-8000-00000000000b"
+      and S.pick_release(rel, "refetch", 0) == "00000000-0000-4000-8000-00000000000a", "a release is taken by its MBID, or a position from the shell")
+try:
+    S.pick_release(rel, "refetch", "00000000-0000-4000-8000-00000000000c")
+    gone = None
+except RuntimeError as e:
+    gone = str(e)
+check(gone and "no longer offered" in gone, "and one the list no longer has is refused, never swapped for another")
+os.makedirs(f"{T}/names/Bj\u00f6rk/Homogenic", exist_ok=True)
+nfd = "Bjo\u0308rk"
+check(S.library_name(f"{T}/names", nfd, "HOMOGENIC", None) == f"{T}/names/Bj\u00f6rk/Homogenic",
+      "filing merges an artist spelled with a combining accent, and an album title differing only in case")
+os.makedirs(f"{MUSIC}/MP3/Art/Fresh", exist_ok=True)
+out = S.fetch_cover_cli("mp3", 50)
+check(out and load(f"{STATE}/bin.json")["entries"][-1]["album_id"] is None, "an MP3 album's fetched cover claims no Lidarr-FLAC album id")
+os.remove(out); shutil.rmtree(f"{MUSIC}/MP3/Art/Fresh")
+dl = S.fm.load_json(S.DOWNLOADS, {"items": []})
+twins = {"items": [{"id": 1, "_dir": T, "name": "a"}, {"id": 1, "_dir": T, "name": "b"}]}
+S.fm.save_json(S.DOWNLOADS, twins)
+r = sift("download", "1", "bin", ok=False)
+check(r.returncode != 0 and "share id" in r.stdout + r.stderr, "two downloads hashed to one id are refused, not guessed between")
+S.fm.save_json(S.DOWNLOADS, dl)
+
 # Sleeve's Send to Soulseek: its claimed folders are neither listed nor touched, and
 # sleeve-file files one by the shared naming rule, as an undoable bin entry
 claims = f"{T}/sleeve-entries.json"
