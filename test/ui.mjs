@@ -83,7 +83,10 @@ execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=teal:s=64x6
 fs.writeFileSync(path.join(STATE, 'artwork/found.json'), JSON.stringify({ albums: { [ART]: {
   found: new Date().toISOString(), state: 'suggested', pick: 0, small: 1,
   cands: [{ key: 'a'.repeat(40), ext: 'jpg', w: 1200, h: 1200, source: 'Cover Art Archive', album: 'One', artist: 'Bare', sure: true, same: true },
-    { key: 'b'.repeat(40), ext: 'jpg', w: 3000, h: 3000, source: 'Apple', album: 'One (Remastered)', artist: 'Bare', sure: false, same: true }] } } }));
+    { key: 'b'.repeat(40), ext: 'jpg', w: 3000, h: 3000, source: 'Apple', album: 'One (Remastered)', artist: 'Bare', sure: false, same: true }] },
+  // queue album 2's search, from its Find artwork online
+  q2: { found: new Date().toISOString(), state: 'suggested', pick: 0, small: 0,
+    cands: [{ key: 'b'.repeat(40), ext: 'jpg', w: 1400, h: 1400, source: 'Deezer', album: 'Fine', artist: 'Other', sure: false, same: true }] } } }));
 fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: new Date().toISOString(), items: [{
   id: 700000001, name: 'Found It Folder', artist: 'Someone', title: 'Found It', kind: 'flac', inst: 'flac', busy: false, cover: false,
   blocked: "Lidarr-FLAC doesn't know this album: add it first", allowed: ['add', 'bin'], force_ok: false, damaged: 0, date: '2020',
@@ -621,13 +624,33 @@ try {
 
   console.log('artwork');
   await page.goto(BASE + '/app#/album/2');
-  await page.waitForSelector('#tart');
-  check((await page.locator('#tart').textContent()) === 'Set artwork', 'an album without a cover offers Set artwork');
+  await page.waitForSelector('#tartweb');
+  check((await page.locator('#tartweb').textContent()) === 'Edit artwork' && await page.locator('#tart').count() === 0, 'an album offers Edit artwork, and no separate Set artwork');
   await page.setInputFiles('#artfile', { name: 'front.png', mimeType: 'image/png', buffer: Buffer.alloc(2048, 3) });
   check((await page.locator('#dbody').textContent()).startsWith('front.png (0 MB) becomes the embedded picture in 1 file of Other — Fine'), 'dropping a picture asks first, naming the album and its files');
   await page.click('#dok');
   await page.waitForTimeout(1500);
   check(calls().some((c) => / art 2 .*\.png$/.test(c)), 'and the picture is sent for the album on screen');
+
+  console.log('artwork online for a queue album');
+  await page.goto(BASE + '/app#/album/2');
+  await page.waitForSelector('#tartweb');
+  check((await page.locator('#tartweb').getAttribute('href')) === '#/art/q2', 'Edit artwork opens its search');
+  await page.click('#tartweb');
+  await page.waitForSelector('.artgrid');
+  check((await page.locator('.artcand').count()) === 1 && (await page.locator('.qname').textContent()) === 'Artwork online'
+    && await page.locator('#artskip').count() === 0 && (await page.locator('.back').getAttribute('href')) === '#/album/2',
+    'it shows what was found, without Skip, and leads back to the album');
+  check(await page.locator('#tart').isVisible(), 'Set artwork from a file is there');
+  await page.click('[data-use="0"]');
+  check((await page.locator('#dbody').textContent()).includes('1400 × 1400 picture from Deezer'), 'using one asks first');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => / art 2 \S+q2-\S+-0\.jpg$/.test(c)), 'and writes it into the queue album');
+  check(new URL(page.url()).hash === '#/album/2', 'then goes back to the album');
+  await page.goto(BASE + '/app#/download/700000001');
+  await page.waitForSelector('#tartweb');
+  check((await page.locator('#tartweb').getAttribute('href')) === '#/art/d700000001', 'a download offers it too');
 
   console.log('missing artwork');
   await page.goto(BASE + '/app#/');

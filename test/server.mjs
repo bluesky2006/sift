@@ -395,6 +395,9 @@ try {
   check((await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: 5 }, csrf })).status === 404
     && (await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: '1' }, csrf })).status === 404
     && (await req('/api/artwork/use', { method: 'POST', body: { id: 1, n: 0 }, csrf })).status === 404, 'an index it hasn\'t got, or an album not listed, is refused');
+  check((await req('/api/artwork/use', { method: 'POST', body: { id: 'q999999', n: 0 }, csrf })).status === 404
+    && (await req('/api/artwork/find', { method: 'POST', body: { id: '../q1' }, csrf })).status === 404
+    && (await req('/api/artwork/x1')).status === 404, 'a queue or download key not listed, or anything else, is refused');
   check((await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: 1 }, csrf })).status === 202, 'using one starts the job');
   await new Promise((res) => setTimeout(res, 1500));
   const useCall = lastCall();

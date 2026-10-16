@@ -19,11 +19,16 @@ the MP3 you already have and sorted into a queue:
 | Arriving | Imported in the last 30 minutes; checked next time (every 30 minutes) |
 | Downloads | Folders downloaded by hand in slskd (`/DATA/AppData/slskd/downloads`, except `_keep` and folders Sleeve's Send to Soulseek has claimed, which Sleeve files itself). Soularr only imports what it fetched itself, so these wait here. Each shows how Lidarr-FLAC would file it; **Import** hands the whole folder to Lidarr in one `ManualImport` command (importMode move), which renames it into the library, and the album then arrives in the queue. **Add to Lidarr** adds an album Lidarr doesn't have, unmonitored. **Import anyway** (password) overrides Lidarr's advice for a knowingly partial album. **Keep as is** is for a FLAC folder Lidarr doesn't know and MusicBrainz can't match: it moves the folder untouched into `/mnt/roon-music/FLAC/Artist/Album` (no year), named from its tags, bypassing Lidarr; Undo moves it back. An MP3 folder gets **Keep as is** too, into `/mnt/roon-music/MP3`, since the MP3 Lidarr can't see downloads; its dialog also offers **Keep it and look for a FLAC**, which marks the album wanted in Lidarr-FLAC (found by name, else added from MusicBrainz) and clears it from the returned ledger, so Soularr fetches a FLAC. It refuses before moving anything when neither knows the album; Undo moves the folder back and unmonitors the album. **Change release** sits with the tools, beside Spectrograms. A download page also lists files Soulseek gave up on (from slskd's transfer history), counting only users who delivered something to that folder. After the import a `cover.jpg` is put beside the files if the folder has no picture, from Lidarr's image of the album or else the Cover Art Archive. The emptied folder goes in the bin; an import can't be undone from there, the album is decided in the queue instead. MP3 folders wait until the MP3 Lidarr has a mount for the downloads folder (`downloads_in` in `bin/sift.py`) |
 
-**Artwork.** Drop a JPEG or PNG on an album or download page (or press Set artwork) and it is
+**Artwork.** Drop a JPEG or PNG on an album or download page (or press Edit artwork, then Set artwork from a file) and it is
 written into every file on the FLAC side as the embedded picture, resized to 1500 px at most, with
 a `cover.jpg` beside them. Each file's old pictures and any old cover file go in the bin with the
 entry, so Undo puts them back. The picture is the one thing the browser sends that is not an id;
 the server keeps it under `~/.local/state/sift/uploads/` and the engine reads it from there only.
+**Edit artwork** on an album or download page searches as Missing
+artwork does (below) for that album, by its release's MusicBrainz ids where it has them, and
+opens the same picker at `#/art/q<id>` (queue album) or `#/art/d<id>` (download). Its search is
+kept in `artwork/found.json` under that key until the album or download leaves its list; it is
+never searched or used in bulk.
 
 **Missing artwork.** Every check lists the albums in `/mnt/roon-music/FLAC` with no picture at
 all (no image beside the files, none embedded in any of them) in `artwork.json`, as the

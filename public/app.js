@@ -571,18 +571,24 @@ async function followArtworkSearch() {
 }
 
 const SOURCE_NOTE = { 'Cover Art Archive': 'MusicBrainz', Apple: 'Apple Music', Deezer: 'Deezer' };
+// id is a Missing artwork album's, or q<id> for an album in the queue, d<id> for a download:
+// those come from their Set artwork, and go back there once a picture is written
 async function renderArtwork(id, search = false) {
   let a;
+  const page = { q: '#/album/', d: '#/download/' }[String(id)[0]];
   try { a = await api(`/api/artwork/${id}`); } catch {
     if (location.hash !== `#/art/${id}`) return;
-    view.innerHTML = '<p class="empty">This album is no longer missing artwork. <a href="#/">Back to the list</a></p>';
+    view.innerHTML = page ? `<p class="empty">This album is no longer listed. <a href="#/">Back to the list</a></p>`
+      : '<p class="empty">This album is no longer missing artwork. <a href="#/">Back to the list</a></p>';
     return;
   }
   if (location.hash !== `#/art/${id}`) return;
+  const missing = a.kind === 'artwork';
+  const back = missing ? '#/' : `${page}${a.id}`;
   document.title = `${a.title} · Sift`;
   const pick = a.pick != null && a.state === 'suggested' ? a.pick : null;
   const card = (c) => `<figure class="artcand${c.n === pick ? ' picked' : ''}">
-      <img src="/api/artwork/${a.id}/pic/${c.n}" alt="${esc(`${c.album} by ${c.artist}`)}" loading="lazy">
+      <img src="/api/artwork/${a.key}/pic/${c.n}" alt=""${esc(`${c.album} by ${c.artist}`)}" loading="lazy">
       <figcaption><b>${c.w} × ${c.h}</b> · ${esc(SOURCE_NOTE[c.source] || c.source)}
         ${c.sure ? '<span class="badge decision">this release</span>' : c.same ? '<span class="badge">same title</span>' : '<span class="badge warn">another title?</span>'}
         ${c.n === pick ? '<span class="badge new">suggested</span>' : ''}
@@ -591,26 +597,30 @@ async function renderArtwork(id, search = false) {
   const found = !a.searched ? '<p class="empty">Not searched yet.</p>'
     : a.cands.length ? `<div class="artgrid">${a.cands.map(card).join('')}</div>`
       : '<p class="empty">Nothing hi-res found online.</p>';
-  view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a></div>
+  // the picture there now, if any, else the suggestion
+  const cover = a.cover && !missing ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">`
+    : pick != null ? `<img class="cover" src="/api/artwork/${a.key}/pic/${pick}" alt="">`
+    : a.cover ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">` : '<span class="cover none"></span>';
+  view.innerHTML = `<div class="albumnav"><a href="${back}" class="back">${missing ? '← All albums' : '← Back to the album'}</a></div>
     <div class="ahead">
-      ${pick != null ? `<img class="cover" src="/api/artwork/${a.id}/pic/${pick}" alt="">` : '<span class="cover none"></span>'}
-      <div><p class="qname">Missing artwork</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
-      <p class="totals">${a.n} file${a.n === 1 ? '' : 's'}${a.year ? ` · ${esc(a.year)}` : ''} · Roon FLAC library</p></div>
+      ${cover}
+      <div><p class="qname">${missing ? 'Missing artwork' : 'Artwork online'}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
+      <p class="totals">${a.n} file${a.n === 1 ? '' : 's'}${a.year ? ` · ${esc(a.year)}` : ''} · ${missing ? 'Roon FLAC library' : a.kind === 'album' ? 'review queue' : 'download'}</p></div>
     </div>
-    <p class="diag">No picture beside the files or in them. Choose one found online, or drop a JPEG or PNG on this page.
+    <p class="diag">${missing ? 'No picture beside the files or in them.' : a.cover ? 'Whatever picture is there now goes in the bin when one is written.' : 'No picture yet.'} Choose one found online, or drop a JPEG or PNG on this page.
       Only pictures at least 1000 px are offered; ${a.small ? `${a.small} smaller one${a.small === 1 ? ' was' : 's were'} left out` : 'the picture is written at 1500 px at most'}.</p>
     <div class="tools">
       <button id="artsearch"${search ? ' disabled' : ''}>${search ? '<span class="spinner"></span>Searching…' : `${ic('refresh')}${a.searched ? 'Search again' : 'Find artwork online'}`}</button>
       <button id="tart">${ic('image')}Set artwork from a file</button>
-      ${a.searched ? `<button class="ghost" id="artskip">${a.state === 'skipped' ? `${ic('undo')}Suggest again` : `${ic('x')}Skip`}</button>` : ''}
-      ${a.searched ? `<span class="hint">Searched ${esc(ago(a.searched))}.${a.state === 'skipped' ? ' Skipped: Use suggestions leaves it out.' : ''}</span>` : ''}
+      ${a.searched && missing ? `<button class="ghost" id="artskip">${a.state === 'skipped' ? `${ic('undo')}Suggest again` : `${ic('x')}Skip`}</button>` : ''}
+      ${a.searched ? `<span class="hint">Searched ${esc(ago(a.searched))}.${missing && a.state === 'skipped' ? ' Skipped: Use suggestions leaves it out.' : ''}</span>` : ''}
     </div>
     ${found}`;
   artTarget = { id: a.id, files: a.n, label: `${a.artist} — ${a.title}` };
   $('tart').onclick = () => $('artfile').click();
   $('artsearch').onclick = async () => {
     renderArtwork(id, true);
-    try { await api('/api/artwork/find', { id: a.id, again: !!a.searched }); } catch (e) { toast(e.message); }
+    try { await api('/api/artwork/find', { id: a.key, again: !!a.searched }); } catch (e) { toast(e.message); }
     if (location.hash === `#/art/${id}`) { await loadState().catch(() => {}); renderArtwork(id); }
   };
   if ($('artskip')) {
@@ -626,9 +636,10 @@ async function renderArtwork(id, search = false) {
       if (!await ask({ title: 'Write this picture into the files?', ok: 'Write artwork',
         body: `The ${c.w} × ${c.h} picture from ${SOURCE_NOTE[c.source] || c.source} becomes the embedded picture in ${a.n} file${a.n === 1 ? '' : 's'} of ${a.artist} — ${a.title}, and a cover.jpg beside them. This can be undone from the bin.` })) return;
       if (location.hash !== `#/art/${id}`) return;
-      tab = 'artwork'; localStorage.setItem('sift-tab', tab);
-      afterJob = '#/';
-      run('/api/artwork/use', { id: a.id, n: c.n });
+      if (missing) { tab = 'artwork'; localStorage.setItem('sift-tab', tab); }
+      afterJob = back;
+      releaseAudio();
+      run('/api/artwork/use', { id: a.key, n: c.n });
     };
   });
   if (!a.searched && !search) $('artsearch').click();     // opening an unsearched album searches it
@@ -789,7 +800,8 @@ async function offerArt(file) {
       + 'Whatever was there before goes in the bin, so this can be undone.' })) return;
   releaseAudio();
   // a Missing artwork album leaves the list once it has a picture: back to the list after
-  if (location.hash.startsWith('#/art/')) afterJob = '#/';
+  if (/^#\/art\/\d/.test(location.hash)) afterJob = '#/';
+  else if (/^#\/art\/[qd]/.test(location.hash)) afterJob = location.hash.replace('#/art/q', '#/album/').replace('#/art/d', '#/download/');
   try {
     const r = await fetch(`/api/art/${id}`, { method: 'POST', headers: { 'Content-Type': file.type, 'X-CSRF': csrf || '' }, body: file });
     const data = await r.json().catch(() => ({}));
@@ -886,7 +898,7 @@ function toolbar(a) {
   if (a.flac && a.flac.tracks.length) b.push(`<button id="tspectra">${ic('wave')}Spectrograms</button>`);
   if (hasBoth) b.push(`<button id="tpair" class="${a.diagnosis && a.diagnosis.suggest === 'pair' ? 'primary' : ''}">${ic('link')}Pair tracks by hand</button>`);
   if (a.flac && a.flac.tracks.length && a.reorder) b.push(`<button id="torder">${ic('list')}Edit FLAC tracks</button>`);
-  if (a.flac && a.flac.tracks.length) b.push(`<button id="tart">${ic('image')}${a.cover ? 'Replace artwork' : 'Set artwork'}</button>`);
+  if (a.flac && a.flac.tracks.length && !a.flac.tracks.some((t) => t.damaged)) b.push(`<a class="button" id="tartweb" href="#/art/q${a.id}">${ic('image')}Edit artwork</a>`);
   if (a.foreign || a.one_album) {
     b.push(`<button id="tone">${ic('folder')}${a.one_album ? 'Undo "folder is all one album"' : 'This folder is all one album'}</button>`);
   }
@@ -1142,7 +1154,6 @@ async function renderAlbum(id, keepMode = false) {
   });
   artTarget = a.flac && a.flac.tracks.length && !a.flac.tracks.some((t) => t.damaged)
     ? { id: a.id, files: a.flac.tracks.length, label: `${a.artist} — ${a.title}` } : null;
-  on('tart', () => $('artfile').click());
   on('tspectra', () => { mode = 'spectra'; renderAlbum(a.id, true); });
   on('tpair', () => { mode = 'pair'; picked = null; renderAlbum(a.id, true); });
   on('tdone', () => { mode = 'view'; picked = null; renderAlbum(a.id, true); });
@@ -1259,7 +1270,7 @@ async function renderDownload(id) {
     ? `<div class="tools"><span class="hint">Each track's spectrum. A FLAC made from an MP3 goes dark well below the top.</span><button id="tcancel" class="primary">${ic('check')}Done</button></div>`
     : n ? `<div class="tools"><button id="tspectra">${ic('wave')}Spectrograms</button>${mode === 'view' && a.allowed.includes('release')
       ? `<button data-act="release">${ic('list')}Change release</button>` : ''}${!a.busy && !a.damaged
-      ? `<button id="tart">${ic('image')}${a.cover ? 'Replace artwork' : 'Set artwork'}</button>` : ''}</div>` : '';
+      ? `<a class="button" id="tartweb" href="#/art/d${a.id}">${ic('image')}Edit artwork</a>` : ''}</div>` : '';
   const filecell = (k) => {
     const f = v && v.files[k];
     if (!f) return '<div class="cell empty">—</div>';
@@ -1328,7 +1339,6 @@ async function renderDownload(id) {
     b.onclick = (ev) => { ev.stopPropagation(); play('flac', Number(b.dataset.idx), Number(b.dataset.row)); };
   });
   artTarget = n && !a.busy && !a.damaged ? { id: a.id, files: n, label: `${a.artist || a.name} — ${a.title}` } : null;
-  if ($('tart')) $('tart').onclick = () => $('artfile').click();
   if ($('tspectra')) $('tspectra').onclick = () => { mode = 'spectra'; renderDownload(a.id); };
   if ($('tcancel')) $('tcancel').onclick = () => { mode = 'view'; renderDownload(a.id); };
 }
@@ -1678,6 +1688,7 @@ function route() {
   if ((m = /^#\/album\/(\d+)$/.exec(h))) return renderAlbum(Number(m[1]), true);
   if ((m = /^#\/download\/(\d+)$/.exec(h))) return renderDownload(Number(m[1]));
   if ((m = /^#\/art\/(\d+)$/.exec(h))) return renderArtwork(Number(m[1]));
+  if ((m = /^#\/art\/([qd]\d+)$/.exec(h))) return renderArtwork(m[1]);
   album = null;
   if (h === '#/bin') return renderBin();
   if (h === '#/history') return renderHistory();

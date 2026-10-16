@@ -113,12 +113,43 @@ const artwork = new Artwork({ state: STATE, audit });
 // after each check, albums not yet searched are searched in the background (SIFT_ARTWORK_AUTO=0: never)
 async function autoFindArtwork() {
   try {
-    if (await artwork.autoFind(await readState('artwork.json', null))) audit({ event: 'artwork-find-auto' });
+    const w = await readState('artwork.json', null);
+    if (w && await artwork.autoFind(w, await artKeys(w))) audit({ event: 'artwork-find-auto' });
   } catch (e) { audit({ event: 'artwork-find-auto', error: e.message }); }
 }
 if (process.env.SIFT_ARTWORK_AUTO !== '0') {
   setTimeout(autoFindArtwork, 30e3).unref();
   setInterval(autoFindArtwork, 5 * 60e3).unref();
+}
+// What can be searched for artwork online, by key: a Missing artwork album by its id, an
+// album in the review queue as q<id>, a download as d<id>. The same albums Set artwork takes
+const ART_KEY = /^([qd]?)(\d+)$/;
+const artKey = (v) => (Number.isInteger(v) ? String(v) : typeof v === 'string' && ART_KEY.test(v) ? v : null);
+async function artFor(key) {
+  const m = ART_KEY.exec(key || '');
+  if (!m) return null;
+  const id = Number(m[2]);
+  if (!m[1]) {
+    const a = (await readState('artwork.json', { items: [] })).items.find((i) => i.id === id);
+    return a && { ...a, key, kind: 'artwork' };
+  }
+  if (m[1] === 'q') {
+    const i = (await readState('queue.json', { items: [] })).items.find((x) => x.id === id && x.flac && x.flac.tracks.length);
+    if (!i || i.flac.tracks.some((t) => t.damaged)) return null;
+    const det = i.flac.details || {};
+    return { key, kind: 'album', id, artist: i.artist, title: i.title, n: i.flac.tracks.length, cover: !!i.cover,
+      year: (det.original || det.date || '').slice(0, 4), release: det.release, rg: det.release_group || (i._do && i._do.mbid) };
+  }
+  const i = (await readState('downloads.json', { items: [] })).items.find((x) => x.id === id && !x.busy && !x.damaged && x.tracks.length);
+  const rel = i && (i.releases || []).find((r) => r.selected);
+  return i && { key, kind: 'download', id, artist: i.artist || i.name, title: i.title, n: i.tracks.length, cover: !!i.cover,
+    year: i.date, release: rel && rel.release, rg: i.add && i.add.mbid };
+}
+// every key that can still be searched, so pruning keeps their searches
+async function artKeys(w) {
+  const q = await readState('queue.json', { items: [] });
+  const d = await readState('downloads.json', { items: [] });
+  return new Set([...w.items.map((i) => String(i.id)), ...q.items.map((i) => `q${i.id}`), ...d.items.map((i) => `d${i.id}`)]);
 }
 // the Missing artwork list, as the engine last wrote it, with what each album's search found
 async function artworkList() {
@@ -527,18 +558,20 @@ async function handle(req, res) {
     return json(res, 200, { ...pub(item), paths: (item._files || []).map(inside) });
   }
 
-  // a Missing artwork album, with what its search found: sizes, sources and names, no paths
-  if ((m = /^\/api\/artwork\/(\d+)$/.exec(p)) && req.method === 'GET') {
-    const id = Number(m[1]);
-    const item = (await artworkList()).items.find((i) => i.id === id);
-    if (!item) return json(res, 404, { error: 'not listed' });
-    const s = (await artwork.read()).albums[id] || {};
-    return json(res, 200, { ...item, state: s.state || null, pick: s.pick ?? null, small: s.small || 0, searched: s.found || null,
+  // an album's artwork search (Missing artwork, or a queue album or download by key): what it
+  // found, as sizes, sources and names, no paths
+  if ((m = /^\/api\/artwork\/([qd]?\d+)$/.exec(p)) && req.method === 'GET') {
+    const a = await artFor(m[1]);
+    if (!a) return json(res, 404, { error: 'not listed' });
+    const item = a.kind === 'artwork' ? (await artworkList()).items.find((i) => i.id === a.id)
+      : { id: a.id, artist: a.artist, title: a.title, year: a.year, n: a.n, cover: a.cover };
+    const s = (await artwork.read()).albums[a.key] || {};
+    return json(res, 200, { ...item, key: a.key, kind: a.kind, state: s.state || null, pick: s.pick ?? null, small: s.small || 0, searched: s.found || null,
       cands: (s.cands || []).map((c, n) => ({ n, source: c.source, album: c.album, artist: c.artist, w: c.w, h: c.h, sure: c.sure, same: c.same })) });
   }
   // one of its candidate pictures, by index
-  if ((m = /^\/api\/artwork\/(\d+)\/pic\/(\d+)$/.exec(p)) && req.method === 'GET') {
-    const s = (await artwork.read()).albums[Number(m[1])] || {};
+  if ((m = /^\/api\/artwork\/([qd]?\d+)\/pic\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const s = (await artwork.read()).albums[m[1]] || {};
     const c = (s.cands || [])[Number(m[2])];
     const file = artwork.candFile(c);
     if (!file) return send(res, 404, 'not found');
@@ -771,10 +804,9 @@ async function handle(req, res) {
     }
     if (p === '/api/artwork/find') {
       // one album's search, now: the services are asked only if it hasn't been searched, or again is set
-      const w = await readState('artwork.json', { items: [] });
-      const a = w.items.find((i) => i.id === body.id);
+      const a = await artFor(artKey(body.id));
       if (!a) return json(res, 404, { error: 'not listed' });
-      await artwork.findAndKeep(a, { again: body.again === true });
+      await artwork.findAndKeep({ id: a.key, artist: a.artist, title: a.title, release: a.release, rg: a.rg }, { again: body.again === true });
       return json(res, 200, { ok: true });
     }
     // ids given: those albums, searched again, next in a search already running
@@ -792,7 +824,7 @@ async function handle(req, res) {
     if (p === '/api/artwork/find-all') {
       const w = await readState('artwork.json', { items: [] });
       const f = await artwork.read();
-      await artwork.prune(new Set(w.items.map((i) => i.id)));
+      await artwork.prune(await artKeys(w));
       if (!w.items.some((i) => !(f.albums[i.id] && f.albums[i.id].found))) return json(res, 400, { error: 'every album has been searched already' });
       if (!artwork.startFind(w.items)) return json(res, 409, { error: 'a search is already running' });
       audit({ event: 'artwork-find-all', albums: w.items.length });
@@ -811,11 +843,10 @@ async function handle(req, res) {
     if (p === '/api/artwork/use') {
       // the browser names an album and the index of one of its candidates; the picture is
       // copied into uploads and written by the engine like a dropped one
-      const w = await readState('artwork.json', { items: [] });
-      const a = w.items.find((i) => i.id === body.id);
+      const a = await artFor(artKey(body.id));
       if (!a || !Number.isInteger(body.n)) return json(res, 404, { error: 'not listed' });
       if (job && !job.done) return busy();
-      const file = await artwork.stage(a.id, body.n, path.join(STATE, 'uploads'));
+      const file = await artwork.stage(a.key, body.n, path.join(STATE, 'uploads'));
       if (!file) return json(res, 404, { error: 'that picture is gone; search again' });
       const label = `${a.artist} — ${a.title}`;
       audit({ event: 'art', id: a.id, from: 'online', label });
