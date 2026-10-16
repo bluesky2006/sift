@@ -37,7 +37,8 @@ import base64, collections, math, unicodedata, fcntl, hashlib, hmac, json, os, r
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.expanduser("~/claude-roon"))
+# flac_migrate sits beside this file; sleeve_state and the data stay in ~/claude-roon
+sys.path.insert(1, os.path.expanduser("~/claude-roon"))
 import flac_migrate as fm
 import sleeve_state
 import mutagen, mutagen.flac, mutagen.id3

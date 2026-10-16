@@ -14,8 +14,10 @@ how files move, how Undo works or how the browser caches. The early plans were r
   Emptying the bin is the only delete. The one exception is importing a hand-made Soulseek
   download, where Lidarr moves the files (`ManualImport`, whole folder, one batch, per
   `~/notes/flac-upgrade-runbook.md`); it is still recorded in `bin.json`, but not undoable.
-- Classification and the shared check cache live in `~/claude-roon/flac_migrate.py`, outside
-  this repo but in `~/claude-roon`'s own local git (no remote: its scripts hold API keys). Bump
+- Classification and the shared check cache live in `bin/flac_migrate.py`, moved here from
+  `~/claude-roon` on 16 Oct 2026 (a symlink stays there). Its data files and `soularr_dupes`
+  still live in `~/claude-roon`, which is not a git repo and must not become one: it hosts the
+  claude-roon remote session. The Lidarr key is read from Lidarr's config, never written here. Bump
   `MATCH_VERSION` there whenever fingerprint matching changes.
 - `SUSPECT_HZ` in `bin/sift.py` was calibrated on the queue on 16 Sep 2026. Recalibrate on
   known-genuine albums before moving it. Changing how cutoff or loudness is measured means

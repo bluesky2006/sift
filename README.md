@@ -40,7 +40,7 @@ a folder Sleeve has claimed. The albums Sift asks Lidarr-FLAC to search for are 
 - `server.js`: the web app (Node, no dependencies). Own password in `auth.json`, set on the
   first visit. Bound to `127.0.0.1` and the tailnet address only.
 - `bin/sift.py`: the engine. It builds the queue and carries out decisions. Classification is
-  `~/claude-roon/flac_migrate.py`'s `build_plan()`, the same code the migration used.
+  `bin/flac_migrate.py`'s `build_plan()`, the same code the migration used.
 - `~/.local/state/sift/`: `queue.json`, `bin.json`, `overrides.json`, `history.json` (what left
   the bin: emptied, undone, failed in a batch), `notify.json` (the last jot), `covers/`,
   `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `staged.json` (decisions
