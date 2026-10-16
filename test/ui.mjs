@@ -662,6 +662,44 @@ try {
   await page.click('#artskip');
   await page.waitForSelector('#artskip:has-text("Suggest again")');
   check(true, 'Skip turns into Suggest again');
+  await page.click('#artskip');
+  await page.waitForSelector('#artskip:has-text("Skip")');
+
+  console.log('selecting on Missing artwork');
+  await page.goto(BASE + '/app#/');
+  await page.click('[data-tab="artwork"]');
+  await page.click('#selecting');
+  await page.waitForSelector('#q-artwork input.pick');
+  check(await page.locator('[data-artpick="suggested"]').count() === 1 && await page.locator('[data-artpick="unsearched"]').count() === 1
+    && await page.locator('[data-artpick="choose"]').count() === 0, 'Select offers quick picks for the groups the list has');
+  check(await page.locator('[data-many="keep_flac"]').isHidden() && await page.locator('[data-art="find"]').isVisible(),
+    'the bar offers artwork actions, not album decisions');
+  await page.click('[data-all="artwork"]');
+  check((await page.locator('#selcount').textContent()) === '2 selected' && (await page.locator('[data-art="use"]').textContent()) === 'Use suggestions (1)'
+    && (await page.locator('[data-art="find"]').textContent()) === 'Find artwork' && (await page.locator('[data-art="skip"]').textContent()) === 'Skip (1)'
+    && await page.locator('[data-art="unskip"]').isHidden(), 'each action counts the ticked albums it applies to');
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the bar and quick picks fit a phone');
+  await page.click('[data-art="skip"]');
+  await page.waitForSelector('#q-artwork .badge.muted');
+  check((await page.locator('#q-artwork .row').last().textContent()).includes('Bare') && !(await page.locator('#selbar').isVisible()),
+    'Skip on the ticked albums skips them, sinks them to the bottom, and ends Select');
+  await page.click('#selecting');
+  await page.click('[data-all="artwork"]');
+  check(await page.locator('[data-art="unskip"]').isVisible(), 'Suggest again appears once a ticked album is skipped');
+  await page.click('[data-art="unskip"]');
+  await page.waitForSelector('#q-artwork .badge.decision');
+  check(true, 'and puts the suggestion back');
+  await page.click('#selecting');
+  await page.click('[data-artpick="suggested"]');
+  await page.click('[data-art="use"]');
+  check((await page.locator('#dtitle').textContent()) === 'Write 1 picture?', 'Use suggestions on the ticked albums asks first');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().filter((c) => c.includes(' art-many ')).length === 2, 'and writes them');
+  await page.goto(BASE + '/app#/');
+  await page.click('#selecting');
+  await page.click('[data-artpick="unsearched"]');
+  check((await page.locator('#selcount').textContent()) === '1 selected', 'a quick pick ticks just that group');
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {
   await browser.close();

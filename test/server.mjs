@@ -410,6 +410,12 @@ try {
     && (await (await req('/api/state')).json()).artwork.find((a) => a.id === ART).found.state === 'skipped', 'Skip marks it skipped');
   check((await req('/api/artwork/use-suggested', { method: 'POST', body: { ids: [ART] }, csrf })).status === 400, 'and Use suggestions leaves it out');
   await req('/api/artwork/skip', { method: 'POST', body: { id: ART, on: false }, csrf });
+  check((await req('/api/artwork/skip', { method: 'POST', body: { ids: [ART, ART + 1], on: true }, csrf })).status === 200
+    && (await (await req(`/api/artwork/${ART}`)).json()).state === 'skipped', 'Skip takes several ids at once');
+  await req('/api/artwork/skip', { method: 'POST', body: { ids: [ART], on: false }, csrf });
+  check((await req('/api/artwork/skip', { method: 'POST', body: { ids: ['x'] }, csrf })).status === 400
+    && (await req('/api/artwork/find-all', { method: 'POST', body: { ids: [{}] }, csrf })).status === 400
+    && (await req('/api/artwork/find-all', { method: 'POST', body: { ids: [1, 2] }, csrf })).status === 404, 'and ids that are not listed album ids are refused');
   check((await art(ART, 'image/png', Buffer.alloc(100, 1))).status === 202, 'a dropped picture is taken for a Missing artwork album too');
   await new Promise((res) => setTimeout(res, 1500));
 

@@ -110,6 +110,31 @@ await aw.prune(new Set([600000003]));
 const left = await aw.read();
 check(Object.keys(left.albums).join() === '600000003', 'an album no longer listed is forgotten');
 
+console.log('ticked albums');
+const aw3 = new Artwork({ state: fs.mkdtempSync(path.join(os.tmpdir(), 'sift-art3-')), fetchImpl: fakeFetch, pace: 30 });
+const many = [600000020, 600000021, 600000022, 600000023].map((id) => ({ id, artist: 'Bare', title: 'One' }));
+aw3.startFind(many);
+await new Promise((r) => setTimeout(r, 10));
+check(aw3.findSome([many[3], album]) && aw3.jobView().of === 5, 'ticked albums join a search already running, counted once');
+const order = [];
+const seen3 = new Set();
+while (!aw3.jobView().done) {
+  const d = await aw3.read();
+  for (const k of Object.keys(d.albums)) if (!seen3.has(k)) { seen3.add(k); order.push(Number(k)); }
+  await new Promise((r) => setTimeout(r, 5));
+}
+check(order.indexOf(600000023) < order.indexOf(600000021) && order.indexOf(album.id) < order.indexOf(600000021), 'and are searched next, ahead of the rest');
+const was = (await aw3.read()).albums[600000020].found;
+await new Promise((r) => setTimeout(r, 5));
+check(aw3.findSome([many[0]]), 'with nothing running, ticked albums start a search of their own');
+while (!aw3.jobView().done) await new Promise((r) => setTimeout(r, 5));
+check((await aw3.read()).albums[600000020].found !== was, 'searching an album already searched again');
+aw3.startFind([{ id: 600000030, artist: 'Bare', title: 'One' }, { id: 600000031, artist: 'Bare', title: 'One' }]);
+aw3.stop();
+check(!aw3.findSome([many[1]]), 'a search being stopped takes none on');
+while (!aw3.jobView().done) await new Promise((r) => setTimeout(r, 5));
+fs.rmSync(aw3.state, { recursive: true, force: true });
+
 console.log('after each check');
 const aw2 = new Artwork({ state: fs.mkdtempSync(path.join(os.tmpdir(), 'sift-art2-')), fetchImpl: fakeFetch, pace: 0 });
 const list = { checked: '2026-10-16T12:00:00', items: [album] };

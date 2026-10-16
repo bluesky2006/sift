@@ -777,6 +777,18 @@ async function handle(req, res) {
       await artwork.findAndKeep(a, { again: body.again === true });
       return json(res, 200, { ok: true });
     }
+    // ids given: those albums, searched again, next in a search already running
+    const artIds = (v) => Array.isArray(v) && v.length && v.length <= 1000 && v.every(Number.isInteger);
+    if (p === '/api/artwork/find-all' && body.ids !== undefined) {
+      if (!artIds(body.ids)) return json(res, 400, { error: 'ids, please' });
+      const w = await readState('artwork.json', { items: [] });
+      const want = new Set(body.ids);
+      const list = w.items.filter((i) => want.has(i.id));
+      if (!list.length) return json(res, 404, { error: 'none of those is listed' });
+      if (!artwork.findSome(list)) return json(res, 409, { error: 'the search is stopping; try again in a moment' });
+      audit({ event: 'artwork-find-some', albums: list.length });
+      return json(res, 202, { ok: true, albums: list.length });
+    }
     if (p === '/api/artwork/find-all') {
       const w = await readState('artwork.json', { items: [] });
       const f = await artwork.read();
@@ -788,9 +800,12 @@ async function handle(req, res) {
     }
     if (p === '/api/artwork/stop') { artwork.stop(); return json(res, 200, { ok: true }); }
     if (p === '/api/artwork/skip') {
+      // one album (id) or several (ids)
+      if (body.ids !== undefined && !artIds(body.ids)) return json(res, 400, { error: 'ids, please' });
       const w = await readState('artwork.json', { items: [] });
-      if (!w.items.some((i) => i.id === body.id)) return json(res, 404, { error: 'not listed' });
-      await artwork.setSkipped(body.id, body.on !== false);
+      const ids = (body.ids || [body.id]).filter((id) => w.items.some((i) => i.id === id));
+      if (!ids.length) return json(res, 404, { error: 'not listed' });
+      for (const id of new Set(ids)) await artwork.setSkipped(id, body.on !== false);
       return json(res, 200, { ok: true });
     }
     if (p === '/api/artwork/use') {

@@ -45,6 +45,13 @@ const allItems = () => [...state.items, ...(state.downloads || []).map(downloadI
 const suggested = (i) => i.found && i.found.state === 'suggested' && i.found.pick != null;
 // Missing artwork lists suggestions first, then albums with pictures to choose from, then the
 // rest; the sort menu orders each group
+// in Select mode, quick ways to tick a group: [key, button, which albums]
+const ARTWORK_PICKS = [
+  ['suggested', 'Suggested', (i) => suggested(i)],
+  ['choose', 'To choose', (i) => i.found && i.found.state !== 'skipped' && !suggested(i) && i.found.count > 0],
+  ['none', 'Nothing found', (i) => i.found && i.found.state !== 'skipped' && !i.found.count],
+  ['unsearched', 'Not searched', (i) => !i.found],
+];
 const artRank = (i) => (suggested(i) ? 0 : !i.found ? 2 : i.found.state === 'skipped' ? 4 : i.found.count ? 1 : 3);
 const DECISION_TEXT = {
   keep_flac: ['Keep FLAC', 'The FLAC moves into the Roon FLAC library and the MP3 goes in the bin.'],
@@ -375,10 +382,14 @@ function row(i) {
     if (suggested(i)) badges.push('<span class="badge decision">suggestion</span>');
     else if (i.found && i.found.state === 'skipped') badges.push('<span class="badge muted">skipped</span>');
     else if (i.found) badges.push('<span class="badge warn">choose one</span>');
-    return `<a class="row" href="#/art/${i.id}">${pic}
-      <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
+    const text = `${pic}<span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
       <span class="rreason">${esc(i.reasons[0])}</span>
-      <span class="badges">${badges.join('')}</span></span></a>`;
+      <span class="badges">${badges.join('')}</span></span>`;
+    if (selecting) {
+      return `<label class="row picking"><input type="checkbox" class="pick" data-pick="${i.id}" ${selected.has(i.id) ? 'checked' : ''}
+        aria-label="Select ${esc(i.artist)} — ${esc(i.title)}">${text}</label>`;
+    }
+    return `<a class="row" href="#/art/${i.id}">${text}</a>`;
   }
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
@@ -442,7 +453,8 @@ function renderList() {
     // Stage all is for the albums an MP3 confirms; one with no MP3 to replace is decided on its own
     const confirmed = items.filter((i) => !i.no_mp3);
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
-      + (selecting && items.length && !['staged', 'downloads', 'artwork'].includes(key) ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
+      + (selecting && items.length && !['staged', 'downloads'].includes(key) ? `<span class="qpicks">${key === 'artwork' ? ARTWORK_PICKS.filter(([, , f]) => items.some(f))
+        .map(([k, name]) => `<button class="ghost small" data-artpick="${k}">${name}</button>`).join('') : ''}<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button></span>` : '')
       + (!selecting && !search && key === 'ready' && confirmed.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${confirmed.length}</button>` : '')
       + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
@@ -466,6 +478,10 @@ function renderList() {
   if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   view.querySelectorAll('[data-pick]').forEach((c) => {
     c.onchange = () => { const id = Number(c.dataset.pick); if (c.checked) selected.add(id); else selected.delete(id); renderSelection(); };
+  });
+  view.querySelectorAll('[data-artpick]').forEach((b) => {
+    const [, , f] = ARTWORK_PICKS.find(([k]) => k === b.dataset.artpick);
+    b.onclick = () => { byQueue('artwork').filter(f).forEach((i) => selected.add(i.id)); renderList(); };
   });
   view.querySelectorAll('[data-all]').forEach((b) => {
     b.onclick = () => { byQueue(b.dataset.all).forEach((i) => { if (!i.download) selected.add(i.id); }); renderList(); };
@@ -686,9 +702,15 @@ async function stageDecision(path, body, next) {
 function renderSelection() {
   const bar = $('selbar');
   const onList = (location.hash || '#/') === '#/';
-  for (const id of selected) if (!state.items.some((i) => i.id === id)) selected.delete(id);
+  const known = new Set([...state.items, ...(state.artwork || [])].map((i) => i.id));
+  for (const id of selected) if (!known.has(id)) selected.delete(id);
   bar.hidden = !(selecting && onList);
   if (bar.hidden) return;
+  // the Missing artwork tab has its own actions; the album decisions are for the other tabs
+  const onArt = !!$('q-artwork');
+  bar.querySelectorAll('[data-many]').forEach((b) => { b.hidden = onArt; });
+  bar.querySelectorAll('[data-art]').forEach((b) => { b.hidden = !onArt; });
+  if (onArt) { renderArtSelection(); return; }
   const picked = state.items.filter((i) => selected.has(i.id));
   $('selcount').textContent = `${picked.length} selected`;
   bar.querySelectorAll('[data-many]').forEach((b) => {
@@ -705,6 +727,43 @@ function renderSelection() {
   });
 }
 $('selcancel').onclick = () => { selecting = false; selected.clear(); renderList(); };
+
+// the ticked Missing artwork albums: search them, use their suggestions, skip them or not
+function renderArtSelection() {
+  const picked = allItems().filter((i) => i.artwork && selected.has(i.id));
+  $('selcount').textContent = `${picked.length} selected`;
+  const n = (list) => (list.length && list.length !== picked.length ? ` (${list.length})` : '');
+  const done = async (ok) => { selecting = false; selected.clear(); await loadState().catch(() => {}); renderList(); if (ok) toast(ok); };
+  const acts = {
+    use: [picked.filter(suggested), 'checks', 'Use suggestions', async (list) => {
+      if (!await ask({ title: `Write ${list.length} picture${list.length === 1 ? '' : 's'}?`, ok: 'Write artwork',
+        body: "Each suggested picture becomes the embedded picture in its album's files, with a cover.jpg beside them. "
+          + 'Each album gets its own bin entry, so each can be undone.' })) return;
+      selecting = false; selected.clear(); afterJob = null;
+      run('/api/artwork/use-suggested', { ids: list.map((i) => i.id) });
+    }],
+    find: [picked, 'refresh', picked.length && picked.every((i) => i.found) ? 'Search again' : 'Find artwork', async (list) => {
+      try { await api('/api/artwork/find-all', { ids: list.map((i) => i.id) }); } catch (e) { toast(e.message); return; }
+      await done(`Searching ${list.length} album${list.length === 1 ? '' : 's'}${state.artwork_job && !state.artwork_job.done ? ', ahead of the rest' : ''}. Suggestions appear as they are found.`);
+      followArtworkSearch();
+    }],
+    skip: [picked.filter((i) => i.found && i.found.state !== 'skipped'), 'x', 'Skip', async (list) => {
+      try { await api('/api/artwork/skip', { ids: list.map((i) => i.id), on: true }); } catch (e) { toast(e.message); return; }
+      done(`Skipped ${list.length}: Use suggestions leaves ${list.length === 1 ? 'it' : 'them'} out.`);
+    }],
+    unskip: [picked.filter((i) => i.found && i.found.state === 'skipped'), 'undo', 'Suggest again', async (list) => {
+      try { await api('/api/artwork/skip', { ids: list.map((i) => i.id), on: false }); } catch (e) { toast(e.message); return; }
+      done(null);
+    }],
+  };
+  $('selbar').querySelectorAll('[data-art]').forEach((b) => {
+    const [list, icon, name, go] = acts[b.dataset.art];
+    b.innerHTML = `${ic(icon)}${name}${n(list)}`;
+    b.disabled = !list.length;
+    if (b.dataset.art === 'unskip') b.hidden = !list.length;    // only once a ticked album is skipped
+    b.onclick = () => go(list);
+  });
+}
 
 // ---- an album ----------------------------------------------------------------
 

@@ -38,7 +38,10 @@ dropped. After each check (when `artwork.json` is written anew) the server searc
 not yet searched in the background, one about every three seconds, and suggests a picture that
 is surely this album (by MusicBrainz id, or same title and artist); **Find artwork for all** does
 the same on demand, and a search stopped by hand waits for the next check. The tab lists
-suggestions first, then albums with pictures to choose from, then the rest. Pictures are kept in `artwork/cand/`, searches in `artwork/found.json`. The browser sends
+suggestions first, then albums with pictures to choose from, then the rest. **Select** works
+there too, with its own actions on the ticked albums: **Use suggestions**, **Find artwork**
+(searches them again, next in a search already running), **Skip** and **Suggest again**, and
+quick picks to tick a group (Suggested, To choose, Nothing found, Not searched). Pictures are kept in `artwork/cand/`, searches in `artwork/found.json`. The browser sends
 an album id and a candidate's index; the server copies that picture into `uploads/` and the
 engine writes it as it writes a dropped one (`art`, or `art-many` for **Use suggestions**, one
 bin entry per album). Undo puts the album back in the list.

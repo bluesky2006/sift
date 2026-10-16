@@ -418,3 +418,6 @@ body.dropping .ahead::after { content: "Drop the picture to set the artwork"; co
 .artcand figcaption { font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
 .artcand .artname { flex-basis: 100%; color: var(--muted); overflow-wrap: anywhere; }
 .artcand button { margin-top: auto; }
+/* Select mode's quick picks beside Select all: they wrap under the heading on a phone */
+.qhead { flex-wrap: wrap; }
+.qpicks { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
