@@ -25,6 +25,24 @@ a `cover.jpg` beside them. Each file's old pictures and any old cover file go in
 entry, so Undo puts them back. The picture is the one thing the browser sends that is not an id;
 the server keeps it under `~/.local/state/sift/uploads/` and the engine reads it from there only.
 
+**Missing artwork.** Every check lists the albums in `/mnt/roon-music/FLAC` with no picture at
+all (no image beside the files, none embedded in any of them) in `artwork.json`, as the
+**Missing artwork** tab; an album the health check found damaged is left out. Each album's
+answer is kept against its files, so the scan rereads only albums that changed. The server
+(`lib/artwork.js`, adapted from Crate's) finds pictures online: the Cover Art Archive by the
+MusicBrainz release and release group from the files' tags or Lidarr-FLAC, else MusicBrainz by
+name, plus Apple (asked for its largest, which it never scales up) and Deezer by artist and
+album. Only those services' image hosts are fetched from, and only pictures at least 1000 px on
+their shorter side and near square are offered; other artists' albums from a name search are
+dropped. After each check (when `artwork.json` is written anew) the server searches every album
+not yet searched in the background, one about every three seconds, and suggests a picture that
+is surely this album (by MusicBrainz id, or same title and artist); **Find artwork for all** does
+the same on demand, and a search stopped by hand waits for the next check. The tab lists
+suggestions first, then albums with pictures to choose from, then the rest. Pictures are kept in `artwork/cand/`, searches in `artwork/found.json`. The browser sends
+an album id and a candidate's index; the server copies that picture into `uploads/` and the
+engine writes it as it writes a dropped one (`art`, or `art-many` for **Use suggestions**, one
+bin entry per album). Undo puts the album back in the list.
+
 Nothing moves until you approve a decision in the app. Nothing is deleted until you empty the bin.
 The one move Sift doesn't make itself is a download's import, which Lidarr does; it is recorded
 in the bin all the same.
@@ -43,7 +61,8 @@ a folder Sleeve has claimed. The albums Sift asks Lidarr-FLAC to search for are 
   `bin/flac_migrate.py`'s `build_plan()`, the same code the migration used.
 - `~/.local/state/sift/`: `queue.json`, `bin.json`, `overrides.json`, `history.json` (what left
   the bin: emptied, undone, failed in a batch), `notify.json` (the last jot), `covers/`,
-  `spectra/`, `sift.log`, `audit.log`, `health.json`, `settings.json`, `staged.json` (decisions
+  `spectra/`, `sift.log`, `audit.log`, `health.json`, `artwork.json` (library albums with no
+  artwork), `artwork/` (pictures found online, and the searches), `settings.json`, `staged.json` (decisions
   waiting for approval), `refetched.json` (library albums refetched from Library health and
   the copies they replaced), `pending/` (decisions in
   progress), the `lock` files and the two cron logs.

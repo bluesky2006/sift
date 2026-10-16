@@ -1345,6 +1345,51 @@ check(entry["interrupted"] and r.returncode == 0 and len(pics[0]) == 1 and pics[
 r = sift("art", "77", "/etc/hostname", ok=False)
 check(r.returncode != 0 and "the app saved" in r.stdout + r.stderr, "a picture from anywhere but the app's uploads folder is refused")
 
+print("missing artwork")
+lib = f"{MUSIC}/FLAC"
+for d in ("Bare/One (2020)", "Framed/Two", "Inside/Three", "Broken/Four"):
+    tone(f"{lib}/{d}/01.flac", "flac"), tone(f"{lib}/{d}/02.flac", "flac")
+shutil.copy(f"{T}/old.jpg", f"{lib}/Framed/Two/Folder.JPG")
+f2 = mutagen.flac.FLAC(f"{lib}/Inside/Three/02.flac"); f2.add_picture(old_pic); f2.save()
+f1 = mutagen.flac.FLAC(f"{lib}/Bare/One (2020)/01.flac")
+f1["musicbrainz_albumid"] = "00000000-0000-4000-8000-0000000000aa"; f1["musicbrainz_releasegroupid"] = "00000000-0000-4000-8000-0000000000bb"
+f1.save()
+os.utime(f"{lib}/Bare/One (2020)/01.flac", (1_600_000_000, 1_600_000_000))
+hj = load(S.HEALTH, {})
+hj.setdefault("albums", {})[f"{lib}/Broken/Four"] = {"damaged": 1, "sig": [], "tracks": 2}
+json.dump(hj, open(S.HEALTH, "w"))
+listed = {i["artist"]: i for i in S.scan_artwork()}
+bare = listed.get("Bare") or {}
+check("Bare" in listed and not {"Framed", "Inside"} & set(listed),
+      "an album with no picture anywhere is listed; one with a cover file of any case, or a picture in any file, is not")
+check(bare.get("title") == "One" and bare.get("year") == "2020" and bare.get("n") == 2 and bare.get("id") == S.art_id(f"{lib}/Bare/One (2020)")
+      and bare.get("release", "").endswith("aa") and bare.get("rg", "").endswith("bb"), "it carries its title without the year, and the MusicBrainz ids from its tags")
+check("Broken" not in listed, "an album the health check found damaged is left out: nothing is written into damaged files")
+Image.new("RGB", (1200, 1200), "orange").save(f"{STATE}/uploads/m1.png")
+r = sift("art", str(bare["id"]), f"{STATE}/uploads/m1.png")
+pics = [mutagen.flac.FLAC(f"{lib}/Bare/One (2020)/0{k}.flac").pictures for k in (1, 2)]
+listed = {i["artist"] for i in load(S.ARTWORK)["items"]}
+entry = load(f"{STATE}/bin.json")["entries"][-1]
+check(r.returncode == 0 and len(pics[0]) == 1 and len(pics[1]) == 1 and os.path.isfile(f"{lib}/Bare/One (2020)/cover.jpg")
+      and entry["decision"] == "art" and entry["album_id"] == bare["id"] and "Bare" not in listed,
+      "art writes the picture into a Missing artwork album as into any album, and it leaves the list")
+check(os.path.getmtime(f"{lib}/Bare/One (2020)/01.flac") == 1_600_000_000, "its files keep their timestamps")
+r = sift("undo", entry["id"])
+check(r.returncode == 0 and not mutagen.flac.FLAC(f"{lib}/Bare/One (2020)/01.flac").pictures
+      and "Bare" in {i["artist"] for i in load(S.ARTWORK)["items"]}, "Undo takes it out again, and the album is back in Missing artwork")
+Image.new("RGB", (1200, 1200), "teal").save(f"{STATE}/uploads/m2.png")
+Image.new("RGB", (1200, 1200), "olive").save(f"{STATE}/uploads/m3.png")
+r = sift("art-many", str(bare["id"]), f"{STATE}/uploads/m2.png", "612345678", f"{STATE}/uploads/m3.png")
+check(r.returncode == 0 and f"done [{bare['id']}]" in r.stdout and "skipped [612345678]" in r.stdout
+      and len(mutagen.flac.FLAC(f"{lib}/Bare/One (2020)/02.flac").pictures) == 1,
+      "art-many writes each album it can and names the one it can't")
+check(load(f"{STATE}/bin.json")["entries"][-1]["album_id"] == bare["id"], "each album gets its own bin entry")
+r = sift("art-many", "612345678", "/etc/hostname", ok=False)
+check(r.returncode != 0 and "the app saved" in r.stdout + r.stderr, "and refuses a picture from anywhere but the uploads folder")
+r = sift("undo", load(f"{STATE}/bin.json")["entries"][-1]["id"])
+for d in ("Bare", "Framed", "Inside", "Broken"):
+    shutil.rmtree(f"{lib}/{d}")
+
 print("fuse_hidden, vet and the shared cache")
 check(S.fuse_skip(f"{DATA}/music-flac/x") and not S.fuse_skip(f"{DL}/x") and not S.fuse_skip(f"{MUSIC}/FLAC/x"),
       ".fuse_hidden files are skipped on the NTFS drive only")

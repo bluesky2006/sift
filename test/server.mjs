@@ -60,6 +60,19 @@ fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: n
     _rows: [{ path: '/secret/container/01.flac' }] },
   _dir: path.join(MUSIC, 'Art/Alb'), _files: [path.join(MUSIC, 'Art/Alb/01.flac'), '/etc/passwd'],
 }] }));
+// one library album with no artwork, searched, with two pictures found
+const ART = 612345678, KEYA = 'a'.repeat(40), KEYB = 'b'.repeat(40);
+fs.writeFileSync(path.join(STATE, 'artwork.json'), JSON.stringify({ checked: new Date().toISOString(), items: [
+  { id: ART, artist: 'Bare', title: 'One', folder: 'One (2020)', year: '2020', n: 2, rg: null, release: null, first_seen: '2026-10-16T10:00:00', _dir: '/secret/FLAC/Bare/One (2020)' },
+  { id: ART + 1, artist: 'Plain', title: 'Two', folder: 'Two', year: '', n: 1, first_seen: '2026-10-16T10:00:00', _dir: '/secret/FLAC/Plain/Two' }],
+  albums: { '/secret/FLAC/Bare/One (2020)': { sig: [2, 1, 1], art: false } } }));
+fs.mkdirSync(path.join(STATE, 'artwork/cand'), { recursive: true });
+fs.writeFileSync(path.join(STATE, 'artwork/cand', `${KEYA}.jpg`), Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+fs.writeFileSync(path.join(STATE, 'artwork/cand', `${KEYB}.png`), Buffer.from([0x89, 0x50]));
+fs.writeFileSync(path.join(STATE, 'artwork/found.json'), JSON.stringify({ albums: { [ART]: {
+  found: '2026-10-16T10:00:00Z', state: 'suggested', pick: 0, small: 1,
+  cands: [{ key: KEYA, ext: 'jpg', w: 1200, h: 1200, source: 'Cover Art Archive', album: 'One', artist: 'Bare', sure: true, same: true },
+    { key: KEYB, ext: 'png', w: 3000, h: 3000, source: 'Apple', album: 'One', artist: 'Bare', sure: false, same: true }] } } }));
 fs.writeFileSync(path.join(STATE, 'bin.json'), JSON.stringify({ entries: [
   { id: 'b1', at: '2026-09-10T10:00:00', decision: 'keep_flac', album_id: 5, label: 'In — Bin', bytes: 100, ops: [{ op: 'move', from: '/secret/from', to: '/secret/to' }] }] }));
 fs.writeFileSync(path.join(STATE, 'history.json'), JSON.stringify({
@@ -87,7 +100,7 @@ if (taken) {
 }
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
-    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_AUDIO_ROOTS: MUSIC },
+    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_ARTWORK_AUTO: '0', SIFT_AUDIO_ROOTS: MUSIC },
   stdio: 'ignore',
 });
 
@@ -364,6 +377,40 @@ try {
   check(/ art 1 .*\/uploads\/1-[a-z0-9]+\.png$/.test(artCall) && fs.existsSync(artCall.split(' ').pop()),
     `as art ID FILE, with the picture saved under the state folder (${artCall})`);
   check((await art(700000001, 'image/jpeg', Buffer.alloc(100, 1))).status === 202, 'and for a download');
+  await new Promise((res) => setTimeout(res, 1500));
+
+  console.log('missing artwork');
+  const sa = await (await req('/api/state')).json();
+  const row = (sa.artwork || []).find((a) => a.id === ART);
+  check(row && row.found && row.found.state === 'suggested' && row.found.pick === 0 && row.found.count === 2 && !JSON.stringify(sa.artwork).includes('/secret'),
+    'state lists the albums missing artwork, with what was found, and no paths');
+  const page = await (await req(`/api/artwork/${ART}`)).text();
+  const pj = JSON.parse(page);
+  check(pj.cands.length === 2 && pj.cands[1].w === 3000 && pj.cands[0].n === 0 && !page.includes(KEYA) && !page.includes('/secret') && !page.includes('_dir'),
+    'an album\'s page has its candidates by index: sizes and sources, no file names or paths');
+  const pic = await req(`/api/artwork/${ART}/pic/1`);
+  check(pic.status === 200 && pic.headers.get('content-type') === 'image/png', 'a candidate picture is served by index');
+  check((await req(`/api/artwork/${ART}/pic/2`)).status === 404 && (await req('/api/artwork/1/pic/0')).status === 404, 'any other index or album, not found');
+  check((await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: 1 } })).status === 403, 'using one needs the CSRF token');
+  check((await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: 5 }, csrf })).status === 404
+    && (await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: '1' }, csrf })).status === 404
+    && (await req('/api/artwork/use', { method: 'POST', body: { id: 1, n: 0 }, csrf })).status === 404, 'an index it hasn\'t got, or an album not listed, is refused');
+  check((await req('/api/artwork/use', { method: 'POST', body: { id: ART, n: 1 }, csrf })).status === 202, 'using one starts the job');
+  await new Promise((res) => setTimeout(res, 1500));
+  const useCall = lastCall();
+  check(new RegExp(` art ${ART} .*/uploads/${ART}-[a-z0-9]+-1\\.png$`).test(useCall) && fs.readFileSync(useCall.split(' ').pop()).equals(Buffer.from([0x89, 0x50])),
+    `as art ID FILE, with that candidate copied into uploads (${useCall})`);
+  check((await req('/api/artwork/use-suggested', { method: 'POST', body: { ids: ['../x'] }, csrf })).status === 400
+    && (await req('/api/artwork/use-suggested', { method: 'POST', body: { ids: [ART + 1] }, csrf })).status === 400, 'Use suggestions wants ids that have one');
+  check((await req('/api/artwork/use-suggested', { method: 'POST', body: { ids: [ART, ART + 1, ART] }, csrf })).status === 202, 'and runs one job for them');
+  await new Promise((res) => setTimeout(res, 1500));
+  const manyCall = lastCall();
+  check(new RegExp(` art-many ${ART} \\S+/uploads/${ART}-[a-z0-9]+-0\\.jpg$`).test(manyCall), `as art-many ID FILE, each with its suggestion (${manyCall})`);
+  check((await req('/api/artwork/skip', { method: 'POST', body: { id: ART }, csrf })).status === 200
+    && (await (await req('/api/state')).json()).artwork.find((a) => a.id === ART).found.state === 'skipped', 'Skip marks it skipped');
+  check((await req('/api/artwork/use-suggested', { method: 'POST', body: { ids: [ART] }, csrf })).status === 400, 'and Use suggestions leaves it out');
+  await req('/api/artwork/skip', { method: 'POST', body: { id: ART, on: false }, csrf });
+  check((await art(ART, 'image/png', Buffer.alloc(100, 1))).status === 202, 'a dropped picture is taken for a Missing artwork album too');
   await new Promise((res) => setTimeout(res, 1500));
 
   console.log('sign out');

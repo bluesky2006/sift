@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/server.mjs && python3 test/engine.py",
+    "test": "node test/server.mjs && node test/artwork.mjs && python3 test/engine.py",
     "ui": "node test/ui.mjs"
   }
 }

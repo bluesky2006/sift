@@ -16,6 +16,8 @@
     sift.py download ID ACTION         import | import-anyway | add | keep | keep-find | bin | release N, for a listed download
     sift.py fetch-cover INST ALBUM     shell only: put a cover.jpg beside an imported album that has none
     sift.py art ID FILE                write a picture the app saved under state/uploads into the album's files
+    sift.py art-many ID FILE [ID FILE...]  the same for several Missing artwork albums, one bin entry each
+    sift.py artwork                    list the FLAC library's albums with no artwork, write artwork.json
 
     sift.py pair ID M F                MP3 track M is FLAC track F (indexes into the album)
     sift.py unpair ID M                forget a hand-made pair
@@ -1173,6 +1175,11 @@ def check():
     except Exception as e:
         log(f"WARNING: downloads not listed ({e})")
     try:
+        with Lock():
+            scan_artwork()
+    except Exception as e:
+        log(f"WARNING: albums missing artwork not listed ({e})")
+    try:
         notify(q["items"])
     except Exception as e:
         log(f"WARNING: jot not sent ({e})")
@@ -2233,6 +2240,11 @@ def undo(entry_id):
         remember("undone", {**summary(entry), "undone": now()})
         rescan("flac"), rescan("mp3")
         refresh_queue()
+        if entry["decision"] == "art":
+            try:
+                scan_artwork()                    # a library album may be missing its artwork again
+            except Exception as e:
+                log(f"WARNING: albums missing artwork not listed ({e})")
     log(f"undo {entry['decision']}: {entry['label']}")
 
 
@@ -3040,7 +3052,10 @@ def art(item_id, upload):
     if not real.startswith(os.path.realpath(UPLOADS) + "/") or not os.path.isfile(real):
         raise SystemExit("the picture must be one the app saved")
     with Lock():
-        if item_id >= DOWNLOAD_BASE and item_id < HEALTH_BASE:
+        if ART_BASE <= item_id < DOWNLOAD_BASE:
+            set_art(find_art_item(item_id), upload)
+            scan_artwork()
+        elif item_id >= DOWNLOAD_BASE and item_id < HEALTH_BASE:
             item = find_download(item_id)
             set_art(item, upload)
             scan_downloads()
@@ -3048,6 +3063,136 @@ def art(item_id, upload):
             item = find_item(item_id)
             set_art(item, upload)
             refresh_queue()
+
+
+def art_many(pairs):
+    """Pictures for several Missing artwork albums, as one job: each its own bin entry, so each
+    undoes on its own. One that fails is skipped and named; the rest go ahead. Lines starting
+    "done [id]" and "skipped [id]" let the app follow along, as an approval does."""
+    for _, upload in pairs:
+        real = os.path.realpath(upload)
+        if not real.startswith(os.path.realpath(UPLOADS) + "/") or not os.path.isfile(real):
+            raise SystemExit("the picture must be one the app saved")
+    done = 0
+    with Lock():
+        for item_id, upload in pairs:
+            print(f"working [{item_id}]", flush=True)
+            try:
+                set_art(find_art_item(item_id), upload)
+                done += 1
+                print(f"done [{item_id}]", flush=True)
+            except (RuntimeError, SystemExit, OSError) as e:
+                print(f"skipped [{item_id}]: {e}", flush=True)
+        scan_artwork()
+    log(f"artwork written for {done} of {len(pairs)} albums")
+    if not done:
+        raise SystemExit("nothing was written")
+
+
+# ---- library albums with no artwork ---------------------------------------------------
+# Albums in the FLAC library with no picture at all: no image in their folders and none
+# embedded in any file. They are listed in artwork.json for the Missing artwork tab, where a
+# picture found online (the web app's lib/artwork.js) or dropped on the page is written in by
+# set_art(), recorded in the bin like any artwork. Each album's answer is kept against its
+# files' sig, so only albums whose files changed are read again.
+
+ART_BASE = 600_000_000     # below the download, health and duplicate ranges, stable per folder
+ARTWORK = os.path.join(STATE, "artwork.json")
+PICTURES = (".jpg", ".jpeg", ".png")
+
+
+def art_id(path):
+    return ART_BASE + zlib.crc32(path.encode()) % 100_000_000
+
+
+def file_facts(files):
+    """Whether any file holds a picture, and the MusicBrainz ids and year the first one's tags give."""
+    found, facts = False, {}
+    for k, p in enumerate(files):
+        try:
+            m = mutagen.File(p)
+        except Exception:
+            continue
+        if m is None or m.tags is None:
+            continue
+        if getattr(m, "pictures", None) or any(str(key).startswith("APIC") for key in m.tags.keys()):
+            found = True
+        if k == 0 and isinstance(m, mutagen.flac.FLAC):
+            tag = lambda name: (m.tags.get(name) or [""])[0].strip()
+            facts = {"release": tag("musicbrainz_albumid"), "rg": tag("musicbrainz_releasegroupid"),
+                     "year": (tag("date") or tag("originaldate"))[:4]}
+        if found:
+            break
+    return found, {k: v for k, v in facts.items() if v}
+
+
+def lidarr_flac_ids(album_id):
+    """The release group and the monitored release of a Lidarr-FLAC album, from its database."""
+    try:
+        db = sqlite3.connect(CONF["flac_db"], uri=True)
+        row = db.execute("""select a.ForeignAlbumId, (select r.ForeignReleaseId from AlbumReleases r
+                            where r.AlbumId = a.Id and r.Monitored = 1 limit 1) from Albums a where a.Id = ?""",
+                         (album_id,)).fetchone()
+    except Exception:
+        return {}
+    return {k: v for k, v in zip(("rg", "release"), row or ()) if v}
+
+
+def scan_artwork():
+    """List the FLAC library's albums with no picture anywhere, into artwork.json. Nothing changes."""
+    require_mounted(mount_of(CONF["flac_dest"]))
+    old = fm.load_json(ARTWORK, {})
+    known = old.get("albums", {})
+    first = {str(i["id"]): i.get("first_seen") for i in old.get("items", [])}
+    h = fm.load_json(HEALTH, {}).get("albums", {})
+    moved = {v.get("dest"): k for k, v in fm.load_json(CONF["migrated"], {}).items() if v.get("dest")}
+    albums, items = {}, []
+    for artist, title, path in album_folders(CONF["flac_dest"]):
+        try:
+            files = [p for p in fm.folder_audio([path]) if p.lower().endswith((".flac", ".mp3"))]
+            if not files:
+                continue
+            dirs = sorted({os.path.dirname(p) for p in files} | {path})
+            if any(n.lower().endswith(PICTURES) for d in dirs for n in os.listdir(d)):
+                continue
+            sig = folder_sig(files)
+            rec = known.get(path)
+            if not rec or rec.get("sig") != sig:
+                art, facts = file_facts(files)
+                rec = {"sig": sig, "art": art, **facts}
+                if not art and not rec.get("rg") and moved.get(path):
+                    rec.update({k: v for k, v in lidarr_flac_ids(int(moved[path])).items() if not rec.get(k)})
+        except OSError as e:                      # moved or binned while we looked
+            log(f"artwork: skipped {path}: {e}")
+            continue
+        albums[path] = rec
+        if rec["art"] or (h.get(path) or {}).get("damaged"):
+            continue                              # damaged files never get a picture written in
+        iid = art_id(path)
+        items.append({"id": iid, "artist": artist, "title": re.sub(r"\s*\(\d{4}\)$", "", title) or title,
+                      "folder": title, "year": rec.get("year") or (re.findall(r"\((\d{4})\)$", title) or [""])[0],
+                      "n": len(files), "rg": rec.get("rg"), "release": rec.get("release"),
+                      "first_seen": first.get(str(iid)) or now(), "_dir": path})
+    if known and not albums and not items:
+        raise RuntimeError(f"refusing: {CONF['flac_dest']} has no albums in it")
+    fm.save_json(ARTWORK, {"checked": now(), "items": items, "albums": albums})
+    return items
+
+
+def find_art_item(item_id):
+    """A Missing artwork album, in the shape set_art() takes: its FLAC side is its files."""
+    items = [i for i in fm.load_json(ARTWORK, {}).get("items", []) if i["id"] == item_id]
+    if len(items) > 1:                                    # two folders hashed alike
+        raise SystemExit(f"two albums share id {item_id}; set this one's artwork from the shell")
+    if not items:
+        raise SystemExit(f"album {item_id} is not in Missing artwork; press Update")
+    i = items[0]
+    if not os.path.isdir(i["_dir"]):
+        raise SystemExit("that album's folder is gone; press Update")
+    if (fm.load_json(HEALTH, {}).get("albums", {}).get(i["_dir"]) or {}).get("damaged"):
+        raise SystemExit("some files fail flac -t; nothing is written into damaged files")
+    files = [p for p in fm.folder_audio([i["_dir"]]) if p.lower().endswith((".flac", ".mp3"))]
+    return {"id": i["id"], "artist": i["artist"], "title": i["folder"], "_files": {"flac": files}}
 
 
 
@@ -3150,6 +3295,10 @@ def main():
             scan_downloads()
         elif len(a) == 3 and a[0] == "art" and a[1].isdigit():
             art(int(a[1]), a[2])
+        elif len(a) >= 3 and len(a) % 2 == 1 and a[0] == "art-many" and all(x.isdigit() for x in a[1::2]):
+            art_many([(int(x), f) for x, f in zip(a[1::2], a[2::2])])
+        elif a == ["artwork"]:
+            print(f"{len(scan_artwork())} albums with no artwork")
         elif len(a) == 3 and a[0] == "fetch-cover" and a[1] in ("flac", "mp3") and a[2].isdigit():
             print(fetch_cover_cli(a[1], int(a[2])) or "no cover found, or the folder already has one")
         elif len(a) in (3, 4) and a[0] == "download" and a[1].isdigit() \

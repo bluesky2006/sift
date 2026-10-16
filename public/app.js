@@ -1,5 +1,5 @@
 'use strict';
-// Sift's page. Four views on the hash: #/ the queues, #/album/<id>, #/bin, #/history.
+// Sift's page. Views on the hash: #/ the queues, #/album/<id>, #/download/<id>, #/art/<id>, #/bin, #/history.
 // Every change is a POST of an id and a decision name; the server does the rest. Album
 // decisions are staged, and only move files once approved from the Staged tab.
 
@@ -25,15 +25,27 @@ const QUEUES = [
   ['look', 'Needs a look', "Something about the folders means Sift won't move it for you."],
   ['health', 'Library health', 'Albums already in the Roon FLAC library with files that fail flac -t or stop short like a converted MP3, found by the nightly check. Nothing replaces them if you bin them.'],
   ['dupes', 'Library duplicates', 'Albums in both the Roon FLAC library and the MP3 library, matched by folder name. Keep FLAC puts the MP3 in the bin; Keep MP3 puts the FLAC in the bin.'],
+  ['artwork', 'Missing artwork', 'Albums in the Roon FLAC library with no picture at all: none beside the files and none in them. '
+    + 'Sift searches the Cover Art Archive, Apple and Deezer for pictures at least 1000 px after each check, and suggests the one that is surely this album; suggestions come first. '
+    + 'Look the suggestions over, then use them, or open an album to choose another. Each one can be undone from the bin.'],
   ['arriving', 'Arriving', 'Imported in the last few hours; checked once Soularr has finished with them.'],
   ['downloads', 'Downloads', "Folders downloaded by hand in slskd. Soularr only imports what it fetched itself, so these wait here until you import them. "
     + 'Import asks Lidarr to move and rename the whole folder into the library in one go; the album then arrives in the queue like any other.'],
 ];
-const SHORT = { staged: 'Staged', different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health' };
+const SHORT = { staged: 'Staged', different: 'Different or unconfirmed', dupes: 'Duplicates', health: 'Health', artwork: 'Artwork' };
 // a hand-made download, shown in the list beside the albums: what its row says
 const downloadItem = (d) => ({ ...d, queue: 'downloads', download: true, artist: d.artist || d.name,
   reasons: [d.busy ? 'Still downloading' : d.blocked || (d.lidarr ? `Files as ${d.lidarr.artist} — ${d.lidarr.title}` : '')] });
-const allItems = () => [...state.items, ...(state.downloads || []).map(downloadItem)];
+// a library album with no artwork: what its row says
+const artworkItem = (a) => ({ ...a, queue: 'artwork', artwork: true,
+  reasons: [!a.found ? 'Not searched yet' : a.found.state === 'skipped' ? 'Skipped'
+    : a.found.state === 'suggested' ? `Suggested from ${a.found.count} hi-res picture${a.found.count === 1 ? '' : 's'} found`
+      : a.found.count ? `${a.found.count} hi-res picture${a.found.count === 1 ? '' : 's'} found, none surely this album` : 'Nothing hi-res found'] });
+const allItems = () => [...state.items, ...(state.downloads || []).map(downloadItem), ...(state.artwork || []).map(artworkItem)];
+const suggested = (i) => i.found && i.found.state === 'suggested' && i.found.pick != null;
+// Missing artwork lists suggestions first, then albums with pictures to choose from, then the
+// rest; the sort menu orders each group
+const artRank = (i) => (suggested(i) ? 0 : !i.found ? 2 : i.found.state === 'skipped' ? 4 : i.found.count ? 1 : 3);
 const DECISION_TEXT = {
   keep_flac: ['Keep FLAC', 'The FLAC moves into the Roon FLAC library and the MP3 goes in the bin.'],
   keep_mp3: ['Keep MP3', "The FLAC goes in the bin and Soularr won't fetch this album again."],
@@ -281,8 +293,8 @@ async function followJob() {
         $('jobclose').hidden = false;
       } else if (job.ok) {
         setTimeout(() => { bar.hidden = true; }, 2500);
-        if (job.kind === 'art') artStamp = `?v=${Date.now().toString(36)}`;
-        const note = { 'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', art: 'Artwork written. Undo is in the bin.',
+        if (job.kind === 'art' || job.kind === 'art-many') artStamp = `?v=${Date.now().toString(36)}`;
+        const note = { 'art-many': 'Artwork written. Each album can be undone from the bin.', 'empty-bin': 'Bin emptied.', 'apply-staged': 'Approved. Each one can be undone from the bin.', art: 'Artwork written. Undo is in the bin.',
           undo: 'Undone. The album may take a few minutes to reappear, while Lidarr rescans.',
           download_import: 'Imported. The album is in Arriving until Sift checks it.', download_import_anyway: 'Imported. The album is in Arriving until Sift checks it.',
           download_add: 'Added to Lidarr, unmonitored, and the folder checked against it again.', download_release: 'Release changed, and the folder checked again.',
@@ -355,6 +367,19 @@ function row(i) {
       <span class="rreason">${esc((i.reasons || [])[0] || '')}</span>
       <span class="badges">${badges.join('')}</span></span></a>`;
   }
+  if (i.artwork) {
+    // the suggestion is the row's picture, so the list can be looked over before using them
+    const pic = suggested(i) ? `<img class="thumb" src="/api/artwork/${i.id}/pic/${i.found.pick}" alt="" loading="lazy">` : '<span class="thumb none"></span>';
+    badges.push(`<span class="badge flac">${i.n} file${i.n === 1 ? '' : 's'}</span>`);
+    if (i.year) badges.push(`<span class="badge">${esc(i.year)}</span>`);
+    if (suggested(i)) badges.push('<span class="badge decision">suggestion</span>');
+    else if (i.found && i.found.state === 'skipped') badges.push('<span class="badge muted">skipped</span>');
+    else if (i.found) badges.push('<span class="badge warn">choose one</span>');
+    return `<a class="row" href="#/art/${i.id}">${pic}
+      <span class="rtext"><span class="rtitle">${esc(i.artist)} — ${esc(i.title)}</span>
+      <span class="rreason">${esc(i.reasons[0])}</span>
+      <span class="badges">${badges.join('')}</span></span></a>`;
+  }
   if (isNew(i)) badges.push('<span class="badge new">new</span>');
   if (i.flac) badges.push(`<span class="badge flac">FLAC ${esc(i.flac.fmt)} · ${i.flac.n}</span>`);
   if (sortBy === 'arrived' && i.flac && i.flac.imported) badges.push(`<span class="badge" title="When the FLAC arrived">got ${day(i.flac.imported)}</span>`);
@@ -398,7 +423,8 @@ function renderList() {
     $('selecting').onclick = () => { selecting = !selecting; selected.clear(); renderList(); };
   }
   $('selecting').innerHTML = selecting ? `${ic('x')}Cancel` : `${ic('select')}Select`;
-  const byQueue = (key) => allItems().filter((i) => queueOf(i) === key && matches(i)).sort(SORTS[sortBy][1]);
+  const byQueue = (key) => allItems().filter((i) => queueOf(i) === key && matches(i))
+    .sort((x, y) => (key === 'artwork' ? artRank(x) - artRank(y) : 0) || SORTS[sortBy][1](x, y));
   const shown = [];
   for (const [key, name, blurb] of QUEUES) {
     const items = byQueue(key);
@@ -416,11 +442,12 @@ function renderList() {
     // Stage all is for the albums an MP3 confirms; one with no MP3 to replace is decided on its own
     const confirmed = items.filter((i) => !i.no_mp3);
     const head = `<div class="qhead"><h2>${name} <span class="count">${items.length}</span></h2>`
-      + (selecting && items.length && key !== 'staged' && key !== 'downloads' ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
+      + (selecting && items.length && !['staged', 'downloads', 'artwork'].includes(key) ? `<button class="ghost small" data-all="${key}">${ic('checks')}Select all</button>` : '')
       + (!selecting && !search && key === 'ready' && confirmed.length ? `<button class="primary" id="approve">${ic('layers')}Stage all ${confirmed.length}</button>` : '')
       + (key === 'staged' && items.length ? `<button class="primary" id="applystaged"></button>` : '')
       + '</div>';
     $('queues').innerHTML = `<section class="queue" id="q-${key}" role="tabpanel">${head}<p class="blurb">${blurb}</p>`
+      + (key === 'artwork' ? artworkTools(items) : '')
       + (items.length ? items.map(row).join('') : '<p class="empty">Nothing waiting.</p>') + '</section>';
   }
   const tabs = [...view.querySelectorAll('[data-tab]')];
@@ -461,6 +488,134 @@ function renderList() {
   });
   renderApproveButton();
   renderSelection();
+  bindArtworkTools();
+}
+
+// ---- missing artwork ---------------------------------------------------------
+// The search over every album runs in the server, slowly, for the services' sake; the list
+// follows it while it runs. Using the suggestions writes them all as one job.
+
+function artworkTools(items) {
+  const j = state.artwork_job;
+  const running = j && !j.done;
+  const unsearched = (state.artwork || []).filter((a) => !a.found).length;
+  const ready = items.filter(suggested);
+  const bits = [];
+  if (running) bits.push(`<span class="hint"><span class="spinner"></span> ${esc(j.output || 'Starting the search…')}${j.auto ? ' (after the check)' : ''}</span>`, `<button class="ghost small" id="artstop">${ic('x')}Stop</button>`);
+  else if (unsearched) bits.push(`<button id="artfind">${ic('image')}Find artwork for ${unsearched === (state.artwork || []).length ? 'all' : `the ${unsearched} not searched`}</button>`);
+  if (ready.length) bits.push(`<button class="primary" id="artuse">${ic('checks')}Use ${ready.length} suggestion${ready.length === 1 ? '' : 's'}</button>`);
+  if (j && j.done && j.note && !running) bits.push(`<span class="hint">${esc(j.note)}</span>`);
+  return bits.length ? `<div class="tools arttools">${bits.join('')}</div>` : '';
+}
+
+function bindArtworkTools() {
+  if ($('artfind')) {
+    $('artfind').onclick = async () => {
+      const n = (state.artwork || []).filter((a) => !a.found).length;
+      if (!await ask({ title: `Search for ${n} album${n === 1 ? '' : 's'}?`, ok: 'Search',
+        body: `About three seconds an album, so roughly ${Math.max(1, Math.round(n * 3 / 60))} min, in the background: you can carry on meanwhile. Nothing is written until you use the suggestions.` })) return;
+      try { await api('/api/artwork/find-all', {}); } catch (e) { toast(e.message); return; }
+      await loadState();
+      renderList();
+      followArtworkSearch();
+    };
+  }
+  if ($('artstop')) $('artstop').onclick = async () => { await api('/api/artwork/stop', {}).catch(() => {}); };
+  if ($('artuse')) {
+    $('artuse').onclick = async () => {
+      const ids = allItems().filter((i) => i.artwork && matches(i) && suggested(i)).map((i) => i.id);
+      if (!await ask({ title: `Write ${ids.length} picture${ids.length === 1 ? '' : 's'}?`, ok: 'Write artwork',
+        body: 'Each suggested picture becomes the embedded picture in its album\'s files, with a cover.jpg beside them. '
+          + 'Open any that looks wrong first and choose another, or Skip it. Each album gets its own bin entry, so each can be undone.' })) return;
+      afterJob = null;
+      run('/api/artwork/use-suggested', { ids });
+    };
+  }
+  if (state.artwork_job && !state.artwork_job.done) followArtworkSearch();
+}
+
+// while the search over every album runs, the list and its progress line keep up
+let artFollowing = false;
+async function followArtworkSearch() {
+  if (artFollowing) return;
+  artFollowing = true;
+  try {
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (polling) continue;
+      try { await loadState(); } catch { break; }
+      if ((location.hash || '#/') === '#/' && tab === 'artwork' && !$('dialog').open) {
+        const y = window.scrollY;
+        renderList();
+        window.scrollTo(0, y);
+      }
+      if (!state.artwork_job || state.artwork_job.done) break;
+    }
+  } finally { artFollowing = false; }
+}
+
+const SOURCE_NOTE = { 'Cover Art Archive': 'MusicBrainz', Apple: 'Apple Music', Deezer: 'Deezer' };
+async function renderArtwork(id, search = false) {
+  let a;
+  try { a = await api(`/api/artwork/${id}`); } catch {
+    if (location.hash !== `#/art/${id}`) return;
+    view.innerHTML = '<p class="empty">This album is no longer missing artwork. <a href="#/">Back to the list</a></p>';
+    return;
+  }
+  if (location.hash !== `#/art/${id}`) return;
+  document.title = `${a.title} · Sift`;
+  const pick = a.pick != null && a.state === 'suggested' ? a.pick : null;
+  const card = (c) => `<figure class="artcand${c.n === pick ? ' picked' : ''}">
+      <img src="/api/artwork/${a.id}/pic/${c.n}" alt="${esc(`${c.album} by ${c.artist}`)}" loading="lazy">
+      <figcaption><b>${c.w} × ${c.h}</b> · ${esc(SOURCE_NOTE[c.source] || c.source)}
+        ${c.sure ? '<span class="badge decision">this release</span>' : c.same ? '<span class="badge">same title</span>' : '<span class="badge warn">another title?</span>'}
+        ${c.n === pick ? '<span class="badge new">suggested</span>' : ''}
+        <span class="artname">${esc(c.album)}${c.artist ? ` — ${esc(c.artist)}` : ''}</span></figcaption>
+      <button class="${c.n === pick ? 'primary' : ''}" data-use="${c.n}">${ic('check')}Use this</button></figure>`;
+  const found = !a.searched ? '<p class="empty">Not searched yet.</p>'
+    : a.cands.length ? `<div class="artgrid">${a.cands.map(card).join('')}</div>`
+      : '<p class="empty">Nothing hi-res found online.</p>';
+  view.innerHTML = `<div class="albumnav"><a href="#/" class="back">← All albums</a></div>
+    <div class="ahead">
+      ${pick != null ? `<img class="cover" src="/api/artwork/${a.id}/pic/${pick}" alt="">` : '<span class="cover none"></span>'}
+      <div><p class="qname">Missing artwork</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
+      <p class="totals">${a.n} file${a.n === 1 ? '' : 's'}${a.year ? ` · ${esc(a.year)}` : ''} · Roon FLAC library</p></div>
+    </div>
+    <p class="diag">No picture beside the files or in them. Choose one found online, or drop a JPEG or PNG on this page.
+      Only pictures at least 1000 px are offered; ${a.small ? `${a.small} smaller one${a.small === 1 ? ' was' : 's were'} left out` : 'the picture is written at 1500 px at most'}.</p>
+    <div class="tools">
+      <button id="artsearch"${search ? ' disabled' : ''}>${search ? '<span class="spinner"></span>Searching…' : `${ic('refresh')}${a.searched ? 'Search again' : 'Find artwork online'}`}</button>
+      <button id="tart">${ic('image')}Set artwork from a file</button>
+      ${a.searched ? `<button class="ghost" id="artskip">${a.state === 'skipped' ? `${ic('undo')}Suggest again` : `${ic('x')}Skip`}</button>` : ''}
+      ${a.searched ? `<span class="hint">Searched ${esc(ago(a.searched))}.${a.state === 'skipped' ? ' Skipped: Use suggestions leaves it out.' : ''}</span>` : ''}
+    </div>
+    ${found}`;
+  artTarget = { id: a.id, files: a.n, label: `${a.artist} — ${a.title}` };
+  $('tart').onclick = () => $('artfile').click();
+  $('artsearch').onclick = async () => {
+    renderArtwork(id, true);
+    try { await api('/api/artwork/find', { id: a.id, again: !!a.searched }); } catch (e) { toast(e.message); }
+    if (location.hash === `#/art/${id}`) { await loadState().catch(() => {}); renderArtwork(id); }
+  };
+  if ($('artskip')) {
+    $('artskip').onclick = async () => {
+      try { await api('/api/artwork/skip', { id: a.id, on: a.state !== 'skipped' }); } catch (e) { toast(e.message); return; }
+      await loadState().catch(() => {});
+      renderArtwork(id);
+    };
+  }
+  view.querySelectorAll('[data-use]').forEach((b) => {
+    b.onclick = async () => {
+      const c = a.cands[Number(b.dataset.use)];
+      if (!await ask({ title: 'Write this picture into the files?', ok: 'Write artwork',
+        body: `The ${c.w} × ${c.h} picture from ${SOURCE_NOTE[c.source] || c.source} becomes the embedded picture in ${a.n} file${a.n === 1 ? '' : 's'} of ${a.artist} — ${a.title}, and a cover.jpg beside them. This can be undone from the bin.` })) return;
+      if (location.hash !== `#/art/${id}`) return;
+      tab = 'artwork'; localStorage.setItem('sift-tab', tab);
+      afterJob = '#/';
+      run('/api/artwork/use', { id: a.id, n: c.n });
+    };
+  });
+  if (!a.searched && !search) $('artsearch').click();     // opening an unsearched album searches it
 }
 
 // Approving is the step that moves files: it confirms, naming what each decision will do.
@@ -574,6 +729,8 @@ async function offerArt(file) {
     body: `${file.name} (${gb(file.size)}) becomes the embedded picture in ${files} file${files === 1 ? '' : 's'} of ${label}, and a cover.jpg beside them. `
       + 'Whatever was there before goes in the bin, so this can be undone.' })) return;
   releaseAudio();
+  // a Missing artwork album leaves the list once it has a picture: back to the list after
+  if (location.hash.startsWith('#/art/')) afterJob = '#/';
   try {
     const r = await fetch(`/api/art/${id}`, { method: 'POST', headers: { 'Content-Type': file.type, 'X-CSRF': csrf || '' }, body: file });
     const data = await r.json().catch(() => ({}));
@@ -1461,6 +1618,7 @@ function route() {
   renderSelection();
   if ((m = /^#\/album\/(\d+)$/.exec(h))) return renderAlbum(Number(m[1]), true);
   if ((m = /^#\/download\/(\d+)$/.exec(h))) return renderDownload(Number(m[1]));
+  if ((m = /^#\/art\/(\d+)$/.exec(h))) return renderArtwork(Number(m[1]));
   album = null;
   if (h === '#/bin') return renderBin();
   if (h === '#/history') return renderHistory();

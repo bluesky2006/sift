@@ -406,3 +406,15 @@ body.dropping .ahead::after { content: "Drop the picture to set the artwork"; co
 /* a long track name ends in an ellipsis instead of running off the side */
 .plabel { min-width: 0; }
 #ptitle { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* Missing artwork: pictures found online, to choose from */
+.arttools .hint { display: flex; align-items: center; gap: 8px; flex-basis: auto; }
+.arttools .hint .spinner { width: 14px; height: 14px; }
+.artgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 12px; margin: 0 4px 16px; }
+.artcand { margin: 0; padding: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px; }
+.artcand.picked { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.artcand img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 10px; background: var(--line); }
+.artcand figcaption { font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.artcand .artname { flex-basis: 100%; color: var(--muted); overflow-wrap: anywhere; }
+.artcand button { margin-top: auto; }

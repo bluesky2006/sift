@@ -72,6 +72,18 @@ fs.writeFileSync(path.join(STATE, 'queue.json'), JSON.stringify({
       mp3: null, pairs: [], cover: false, _files: { flac: [], mp3: [] } },
   ],
 }));
+// two library albums with no artwork: one searched, with a suggestion, one not yet searched
+const ART = 612345678;
+fs.writeFileSync(path.join(STATE, 'artwork.json'), JSON.stringify({ checked: new Date().toISOString(), items: [
+  { id: ART, artist: 'Bare', title: 'One', folder: 'One (2020)', year: '2020', n: 2, first_seen: '2026-10-16T10:00:00', _dir: '/x/Bare/One (2020)' },
+  { id: ART + 1, artist: 'Able', title: 'Two', folder: 'Two', year: '', n: 1, first_seen: '2026-10-16T10:00:00', _dir: '/x/Able/Two' }] }));
+fs.mkdirSync(path.join(STATE, 'artwork/cand'), { recursive: true });
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=orange:s=64x64', '-frames:v', '1', path.join(STATE, 'artwork/cand', `${'a'.repeat(40)}.jpg`)]);
+execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=teal:s=64x64', '-frames:v', '1', path.join(STATE, 'artwork/cand', `${'b'.repeat(40)}.jpg`)]);
+fs.writeFileSync(path.join(STATE, 'artwork/found.json'), JSON.stringify({ albums: { [ART]: {
+  found: new Date().toISOString(), state: 'suggested', pick: 0, small: 1,
+  cands: [{ key: 'a'.repeat(40), ext: 'jpg', w: 1200, h: 1200, source: 'Cover Art Archive', album: 'One', artist: 'Bare', sure: true, same: true },
+    { key: 'b'.repeat(40), ext: 'jpg', w: 3000, h: 3000, source: 'Apple', album: 'One (Remastered)', artist: 'Bare', sure: false, same: true }] } } }));
 fs.writeFileSync(path.join(STATE, 'downloads.json'), JSON.stringify({ checked: new Date().toISOString(), items: [{
   id: 700000001, name: 'Found It Folder', artist: 'Someone', title: 'Found It', kind: 'flac', inst: 'flac', busy: false, cover: false,
   blocked: "Lidarr-FLAC doesn't know this album: add it first", allowed: ['add', 'bin'], force_ok: false, damaged: 0, date: '2020',
@@ -98,7 +110,7 @@ if (taken) {
 }
 const server = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
   env: { ...process.env, PORT: String(PORT), HOSTS: '127.0.0.1', SIFT_STATE: STATE,
-    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_AUDIO_ROOTS: MEDIA },
+    SIFT_AUTH_FILE: path.join(T, 'auth.json'), SIFT_PYTHON: stub, SIFT_ARTWORK_AUTO: '0', SIFT_AUDIO_ROOTS: MEDIA },
   stdio: 'ignore',
 });
 for (let i = 0; i < 50; i++) {
@@ -123,7 +135,7 @@ try {
   check(await page.locator('#q-ready a.row').count() === 2
     && (await page.locator('#q-ready .badge.warn').textContent()) === 'No MP3 to replace',
     'a ready album with no MP3 to replace says so, and Stage all counts only the other one');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 2|Suspect FLAC 1|Different or unconfirmed 2|Health 1|Downloads 1', 'queue tabs with counts');
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Ready 2|Suspect FLAC 1|Different or unconfirmed 2|Health 1|Artwork 2|Downloads 1', 'queue tabs with counts');
   check(await page.locator('section.queue').count() === 1 && await page.locator('#q-ready').count() === 1, 'only the Ready tab shows at first');
   await page.click('[data-tab="suspect"]');
   check((await page.locator('#q-suspect .badge.bad').textContent()) === 'FLAC stops at 16.0 kHz', 'a tab shows its queue; a suspect album shows where its FLAC stops');
@@ -155,7 +167,7 @@ try {
   await page.waitForSelector('[data-tab="staged"]');
   check(!calls().some((c) => /resolve|apply-staged/.test(c)), 'a decision on the selection is staged, and nothing runs');
   check(await page.locator('#selbar').isHidden() && await page.locator('input.pick').count() === 0, 'and Select mode ends');
-  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 1|Different or unconfirmed 2|Health 1|Downloads 1',
+  check((await page.locator('.jump [role=tab]').allTextContents()).join('|') === 'Staged 2|Ready 1|Different or unconfirmed 2|Health 1|Artwork 2|Downloads 1',
     'the staged albums leave their queues for a Staged tab');
 
   console.log('staged');
@@ -617,6 +629,39 @@ try {
   await page.waitForTimeout(1500);
   check(calls().some((c) => / art 2 .*\.png$/.test(c)), 'and the picture is sent for the album on screen');
 
+  console.log('missing artwork');
+  await page.goto(BASE + '/app#/');
+  await page.reload();
+  await page.click('[data-tab="artwork"]');
+  await page.waitForSelector('#q-artwork');
+  check((await page.locator('#q-artwork .row').count()) === 2 && await page.locator(`#q-artwork img[src="/api/artwork/${ART}/pic/0"]`).count() === 1,
+    'the Missing artwork tab lists both albums, the searched one showing its suggestion');
+  check((await page.locator('#q-artwork .rtitle').first().textContent()) === 'Bare — One', 'the suggestion comes first, ahead of Able in artist order');
+  check((await page.locator('#artfind').textContent()).includes('the 1 not searched') && (await page.locator('#artuse').textContent()).includes('Use 1 suggestion'),
+    'it offers to search the one not searched, and to use the one suggestion');
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'nothing spills sideways on a phone');
+  await page.click('#artuse');
+  check((await page.locator('#dtitle').textContent()) === 'Write 1 picture?', 'using the suggestions asks first');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => new RegExp(` art-many ${ART} \\S+-0\\.jpg$`).test(c)), 'and writes them as one job');
+  await page.goto(BASE + `/app#/art/${ART}`);
+  await page.waitForSelector('.artgrid');
+  check((await page.locator('.artcand').count()) === 2 && (await page.locator('.artcand.picked figcaption').textContent()).includes('1200 × 1200'),
+    'an album\'s page shows each picture found, with its size, the suggestion marked');
+  check((await page.locator('.diag').textContent()).includes('1 smaller one was left out'), 'and says how many smaller ones were left out');
+  check(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), 'the pictures fit a phone\'s width');
+  await page.locator('[data-use="1"]').click();
+  check((await page.locator('#dbody').textContent()).includes('3000 × 3000 picture from Apple Music'), 'choosing another asks first, naming its size and source');
+  await page.click('#dok');
+  await page.waitForTimeout(1500);
+  check(calls().some((c) => new RegExp(` art ${ART} \\S+-1\\.jpg$`).test(c)), 'and writes that one, by its index');
+  check(new URL(page.url()).hash === '#/', 'once written, it goes back to the list');
+  await page.goto(BASE + `/app#/art/${ART}`);
+  await page.waitForSelector('#artskip');
+  await page.click('#artskip');
+  await page.waitForSelector('#artskip:has-text("Suggest again")');
+  check(true, 'Skip turns into Suggest again');
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {
   await browser.close();

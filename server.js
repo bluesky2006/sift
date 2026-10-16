@@ -14,6 +14,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 
 const auth = require('./lib/auth');
+const { Artwork } = require('./lib/artwork');
 
 const PORT = Number(process.env.PORT || 8305);
 // Loopback plus the tailnet address, never 0.0.0.0, same as Switchboard.
@@ -105,6 +106,29 @@ async function readBody(req, limit = 16 * 1024) {
 function audit(event) {
   const line = JSON.stringify({ at: new Date().toISOString(), ...event }) + '\n';
   fsp.appendFile(path.join(STATE, 'audit.log'), line).catch(() => {});
+}
+
+// artwork found online for library albums that have none (lib/artwork.js)
+const artwork = new Artwork({ state: STATE, audit });
+// after each check, albums not yet searched are searched in the background (SIFT_ARTWORK_AUTO=0: never)
+async function autoFindArtwork() {
+  try {
+    if (await artwork.autoFind(await readState('artwork.json', null))) audit({ event: 'artwork-find-auto' });
+  } catch (e) { audit({ event: 'artwork-find-auto', error: e.message }); }
+}
+if (process.env.SIFT_ARTWORK_AUTO !== '0') {
+  setTimeout(autoFindArtwork, 30e3).unref();
+  setInterval(autoFindArtwork, 5 * 60e3).unref();
+}
+// the Missing artwork list, as the engine last wrote it, with what each album's search found
+async function artworkList() {
+  const w = await readState('artwork.json', { items: [] });
+  const f = await artwork.read().catch(() => ({ albums: {} }));
+  return { checked: w.checked || null, items: w.items.map((i) => {
+    const s = f.albums[i.id] || {};
+    return { id: i.id, artist: i.artist, title: i.title, year: i.year, n: i.n, first_seen: i.first_seen,
+      found: s.found ? { state: s.state, pick: s.pick, count: (s.cands || []).length, small: s.small || 0 } : null };
+  }) };
 }
 
 const MIME = {
@@ -446,8 +470,10 @@ async function handle(req, res) {
       n: i.tracks.length, fmt: (i.tracks[0] || {}).fmt || '', source: i.source ? { user: i.source.user } : null,
       lidarr: i.lidarr && !i.lidarr.error ? { artist: i.lidarr.artist, title: i.lidarr.title } : null,
     }));
+    const art = await artworkList();
     return json(res, 200, {
       built: q.built, checked: q.checked, previous_check: q.previous_check, items, downloads, downloads_checked: d.checked,
+      artwork: art.items, artwork_checked: art.checked, artwork_job: artwork.jobView(),
       bin: b.entries.map((e) => ({ id: e.id, at: e.at, decision: e.decision, label: e.label, bytes: e.bytes || 0 }))
         .reverse(),
       staged: (await readStaged(q)).map((e) => {
@@ -501,6 +527,28 @@ async function handle(req, res) {
     return json(res, 200, { ...pub(item), paths: (item._files || []).map(inside) });
   }
 
+  // a Missing artwork album, with what its search found: sizes, sources and names, no paths
+  if ((m = /^\/api\/artwork\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const id = Number(m[1]);
+    const item = (await artworkList()).items.find((i) => i.id === id);
+    if (!item) return json(res, 404, { error: 'not listed' });
+    const s = (await artwork.read()).albums[id] || {};
+    return json(res, 200, { ...item, state: s.state || null, pick: s.pick ?? null, small: s.small || 0, searched: s.found || null,
+      cands: (s.cands || []).map((c, n) => ({ n, source: c.source, album: c.album, artist: c.artist, w: c.w, h: c.h, sure: c.sure, same: c.same })) });
+  }
+  // one of its candidate pictures, by index
+  if ((m = /^\/api\/artwork\/(\d+)\/pic\/(\d+)$/.exec(p)) && req.method === 'GET') {
+    const s = (await artwork.read()).albums[Number(m[1])] || {};
+    const c = (s.cands || [])[Number(m[2])];
+    const file = artwork.candFile(c);
+    if (!file) return send(res, 404, 'not found');
+    try {
+      const etag = etagOf(await fsp.stat(file));
+      if (notModified(req, res, etag)) return;
+      return send(res, 200, await fsp.readFile(file), { 'Content-Type': c.ext === 'png' ? 'image/png' : 'image/jpeg', 'Cache-Control': REVALIDATE, ETag: etag });
+    } catch { return send(res, 404, 'not found'); }
+  }
+
   if ((m = /^\/api\/cover\/(\d+)(?:\/(flac|mp3))?$/.exec(p)) && req.method === 'GET') {
     try {
       const file = path.join(STATE, 'covers', `${Number(m[1])}${m[2] ? `-${m[2]}` : ''}.jpg`);
@@ -543,8 +591,10 @@ async function handle(req, res) {
       if (!ART_TYPES[type]) { req.resume(); return json(res, 415, { error: 'a JPEG or PNG, please' }); }
       const q = await readState('queue.json', { items: [] });
       const d = await readState('downloads.json', { items: [] });
+      const w = await readState('artwork.json', { items: [] });
       const item = q.items.find((i) => i.id === id && i.flac && i.flac.tracks.length)
-        || d.items.find((i) => i.id === id && !i.busy && i.tracks.length);
+        || d.items.find((i) => i.id === id && !i.busy && i.tracks.length)
+        || w.items.find((i) => i.id === id);
       if (!item) { req.resume(); return json(res, 404, { error: 'nothing to write it into' }); }
       const bytes = await readRaw(req, ART_LIMIT);
       if (!bytes.length) return json(res, 400, { error: 'no picture' });
@@ -718,6 +768,66 @@ async function handle(req, res) {
     if (p === '/api/downloads') {
       const j = startJob('downloads', ['downloads'], 'Listing downloads');
       return j ? json(res, 202, { job: j.id }) : busy();
+    }
+    if (p === '/api/artwork/find') {
+      // one album's search, now: the services are asked only if it hasn't been searched, or again is set
+      const w = await readState('artwork.json', { items: [] });
+      const a = w.items.find((i) => i.id === body.id);
+      if (!a) return json(res, 404, { error: 'not listed' });
+      await artwork.findAndKeep(a, { again: body.again === true });
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/artwork/find-all') {
+      const w = await readState('artwork.json', { items: [] });
+      const f = await artwork.read();
+      await artwork.prune(new Set(w.items.map((i) => i.id)));
+      if (!w.items.some((i) => !(f.albums[i.id] && f.albums[i.id].found))) return json(res, 400, { error: 'every album has been searched already' });
+      if (!artwork.startFind(w.items)) return json(res, 409, { error: 'a search is already running' });
+      audit({ event: 'artwork-find-all', albums: w.items.length });
+      return json(res, 202, { ok: true });
+    }
+    if (p === '/api/artwork/stop') { artwork.stop(); return json(res, 200, { ok: true }); }
+    if (p === '/api/artwork/skip') {
+      const w = await readState('artwork.json', { items: [] });
+      if (!w.items.some((i) => i.id === body.id)) return json(res, 404, { error: 'not listed' });
+      await artwork.setSkipped(body.id, body.on !== false);
+      return json(res, 200, { ok: true });
+    }
+    if (p === '/api/artwork/use') {
+      // the browser names an album and the index of one of its candidates; the picture is
+      // copied into uploads and written by the engine like a dropped one
+      const w = await readState('artwork.json', { items: [] });
+      const a = w.items.find((i) => i.id === body.id);
+      if (!a || !Number.isInteger(body.n)) return json(res, 404, { error: 'not listed' });
+      if (job && !job.done) return busy();
+      const file = await artwork.stage(a.id, body.n, path.join(STATE, 'uploads'));
+      if (!file) return json(res, 404, { error: 'that picture is gone; search again' });
+      const label = `${a.artist} — ${a.title}`;
+      audit({ event: 'art', id: a.id, from: 'online', label });
+      const j = startJob('art', ['art', String(a.id), file], `Writing artwork: ${label}`);
+      if (!j) { await fsp.unlink(file).catch(() => {}); return busy(); }
+      return json(res, 202, { job: j.id });
+    }
+    if (p === '/api/artwork/use-suggested') {
+      // the suggestion of each album named, those that have one, as one job
+      if (!Array.isArray(body.ids) || !body.ids.length || body.ids.length > 1000 || !body.ids.every(Number.isInteger)) {
+        return json(res, 400, { error: 'ids, please' });
+      }
+      if (job && !job.done) return busy();
+      const w = await readState('artwork.json', { items: [] });
+      const f = await artwork.read();
+      const args = [];
+      for (const id of new Set(body.ids)) {
+        const s = f.albums[id];
+        if (!w.items.some((i) => i.id === id) || !s || s.state !== 'suggested' || s.pick == null) continue;
+        const file = await artwork.stage(id, s.pick, path.join(STATE, 'uploads'));
+        if (file) args.push(String(id), file);
+      }
+      if (!args.length) return json(res, 400, { error: 'none of those has a suggestion' });
+      audit({ event: 'art-many', albums: args.length / 2 });
+      const j = startJob('art-many', ['art-many', ...args], `Writing artwork into ${args.length / 2} album${args.length === 2 ? '' : 's'}`);
+      if (!j) { for (let k = 1; k < args.length; k += 2) await fsp.unlink(args[k]).catch(() => {}); return busy(); }
+      return json(res, 202, { job: j.id });
     }
     if (p === '/api/check') {
       const j = startJob('check', ['check'], 'Checking for new arrivals');
