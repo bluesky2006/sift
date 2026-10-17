@@ -723,6 +723,18 @@ try {
   await page.click('#selecting');
   await page.click('[data-artpick="unsearched"]');
   check((await page.locator('#selcount').textContent()) === '1 selected', 'a quick pick ticks just that group');
+  console.log('previous and next on Missing artwork');
+  await page.goto(BASE + `/app#/art/${ART}`);
+  await page.waitForSelector('#artskip');
+  check(await page.locator('#earlier').isDisabled() && (await page.locator('.albumnav .pager').textContent()).includes('1 of 2'),
+    'the first album in the list offers Next album only');
+  await page.click('#later');
+  await page.waitForSelector('#earlier:not([disabled])');
+  check(new URL(page.url()).hash !== `#/art/${ART}` && (await page.locator('.albumnav .pager').textContent()).includes('2 of 2'),
+    'Next album opens the next one in the list, and Previous comes back');
+  await page.click('#earlier');
+  await page.waitForSelector('#artskip');
+  check(new URL(page.url()).hash === `#/art/${ART}`, 'Previous goes back to the first');
   check(errors.length === 0, `no script errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
 } finally {
   await browser.close();

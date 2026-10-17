@@ -601,7 +601,14 @@ async function renderArtwork(id, search = false) {
   const cover = a.cover && !missing ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">`
     : pick != null ? `<img class="cover" src="/api/artwork/${a.key}/pic/${pick}" alt="">`
     : a.cover ? `<img class="cover" src="/api/cover/${a.id}${artStamp}" alt="">` : '<span class="cover none"></span>';
-  view.innerHTML = `<div class="albumnav"><a href="${back}" class="back">${missing ? '← All albums' : '← Back to the album'}</a></div>
+  // Missing artwork steps through its list, in the list's order
+  const item = missing && allItems().find((i) => i.id === a.id && queueOf(i) === 'artwork');
+  const near = item ? neighbours(item) : { at: -1 };
+  const step = (to, sid, label) => (to ? `<a class="button ghost small" id="${sid}" href="#/art/${to.id}">${label}</a>`
+    : `<button class="ghost small" id="${sid}" disabled>${label}</button>`);
+  const pager = near.at >= 0 && near.of > 1 ? `<span class="pager">${step(near.prev, 'earlier', `${ic('previous')}Previous`)}
+    <span class="muted">${near.at + 1} of ${near.of}</span>${step(near.next, 'later', `Next album${ic('next')}`)}</span>` : '';
+  view.innerHTML = `<div class="albumnav"><a href="${back}" class="back">${missing ? '← All albums' : '← Back to the album'}</a>${pager}</div>
     <div class="ahead">
       ${cover}
       <div><p class="qname">${missing ? 'Missing artwork' : 'Artwork online'}</p><h2>${esc(a.title)}</h2><p class="artist">${esc(a.artist)}</p>
@@ -780,7 +787,9 @@ function renderArtSelection() {
 
 // the albums around this one in its queue, in the list's order and search
 function neighbours(a) {
-  const list = state.items.filter((i) => queueOf(i) === queueOf(a) && matches(i)).sort(SORTS[sortBy][1]);
+  const key = queueOf(a);
+  const list = (key === 'artwork' ? allItems() : state.items).filter((i) => queueOf(i) === key && matches(i))
+    .sort((x, y) => (key === 'artwork' ? artRank(x) - artRank(y) : 0) || SORTS[sortBy][1](x, y));
   const k = list.findIndex((i) => i.id === a.id);
   return { prev: k > 0 ? list[k - 1] : null, next: k >= 0 && k < list.length - 1 ? list[k + 1] : null, at: k, of: list.length };
 }
